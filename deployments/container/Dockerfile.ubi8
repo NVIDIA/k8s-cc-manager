@@ -1,0 +1,64 @@
+# Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ARG CUDA_VERSION
+ARG BASE_DIST
+ARG GOLANG_VERSION=1.20.2
+
+FROM golang:${GOLANG_VERSION} AS build
+
+SHELL ["/bin/bash", "-c"]
+
+ARG TARGETARCH
+WORKDIR /build
+COPY . .
+
+ARG VERSION="N/A"
+ARG GIT_COMMIT="unknown"
+
+RUN go build -o /artifacts/k8s-cc-manager ./cmd
+RUN cp ./scripts/cc-manager.sh /artifacts/cc-manager.sh
+#RUN cp ./scripts/nvidia-gpu-tools.py /artifacts/nvidia-gpu-tools.py
+
+RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o /artifacts/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";
+RUN chmod a+x /artifacts/kubectl
+
+FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
+
+# Install Python Interpreter
+RUN dnf install -y python38 && pip3 install numpy
+
+LABEL io.k8s.display-name="NVIDIA Confidential Containers Manager for Kubernetes"
+LABEL name="NVIDIA Confidential Containers Manager for Kubernetes"
+LABEL vendor="NVIDIA"
+LABEL version="${VERSION}"
+LABEL release="N/A"
+LABEL summary="Manages the CC mode on NVIDIA GPUs with Kubernetes"
+LABEL description="See summary"
+
+RUN mkdir /licenses && mv /NGC-DL-CONTAINER-LICENSE /licenses/NGC-DL-CONTAINER-LICENSE
+
+COPY --from=build /artifacts/k8s-cc-manager /usr/bin/k8s-cc-manager
+COPY --from=build /artifacts/cc-manager.sh /usr/bin/cc-manager.sh
+#COPY --from=build /artifacts/nvidia-gpu-tools.py /usr/bin/nvidia-gpu-tools.py
+COPY --from=build /artifacts/kubectl /usr/bin/kubectl
+
+# Install / upgrade packages here that are required to resolve CVEs
+ARG CVE_UPDATES
+RUN if [ -n "${CVE_UPDATES}" ]; then \
+        yum update -y ${CVE_UPDATES} && \
+        rm -rf /var/cache/yum/*; \
+    fi
+
+ENTRYPOINT ["k8s-cc-manager"]

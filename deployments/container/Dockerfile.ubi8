@@ -29,7 +29,6 @@ ARG GIT_COMMIT="unknown"
 
 RUN go build -o /artifacts/k8s-cc-manager ./cmd
 RUN cp ./scripts/cc-manager.sh /artifacts/cc-manager.sh
-#RUN cp ./scripts/nvidia-gpu-tools.py /artifacts/nvidia-gpu-tools.py
 
 RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o /artifacts/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";
 RUN chmod a+x /artifacts/kubectl
@@ -50,9 +49,12 @@ LABEL description="See summary"
 RUN mkdir /licenses && mv /NGC-DL-CONTAINER-LICENSE /licenses/NGC-DL-CONTAINER-LICENSE
 
 COPY --from=build /artifacts/k8s-cc-manager /usr/bin/k8s-cc-manager
-COPY --from=build /artifacts/cc-manager.sh /usr/bin/cc-manager.sh
-#COPY --from=build /artifacts/nvidia-gpu-tools.py /usr/bin/nvidia-gpu-tools.py
 COPY --from=build /artifacts/kubectl /usr/bin/kubectl
+
+# Setup CC tools and licenses
+COPY --from=build /artifacts/cc-manager.sh /usr/bin/cc-manager.sh
+RUN curl -o /usr/bin/gpu_cc_tool.py -L https://raw.githubusercontent.com/NVIDIA/nvtrust/main/host_tools/python/gpu_cc_tool.py && chmod a+x /usr/bin/gpu_cc_tool.py
+RUN curl -o /licenses/LICENSE.txt -L https://raw.githubusercontent.com/NVIDIA/nvtrust/main/host_tools/python/LICENSE.txt
 
 # Install / upgrade packages here that are required to resolve CVEs
 ARG CVE_UPDATES

@@ -28,7 +28,7 @@ _populate_cc_capable_device_ids() {
 
 _reset_gpu_after_cc_mode() {
     local gpu=$1
-    python3 /usr/bin/nvidia-gpu-tools.py --reset-after-cc-mode-switch --gpu-bdf=$gpu
+    python3 /usr/bin/gpu_cc_tool.py --reset-after-cc-mode-switch --gpu-bdf=$gpu
     if [ $? -ne 0 ]; then
         echo "unable to reset gpu $gpu for cc mode switch, output"
         return 1
@@ -149,7 +149,7 @@ _assert_gpu_cc_mode() {
     local gpu=$1
     local mode=$2
 
-    output=$(python3 /usr/bin/nvidia-gpu-tools.py --query-cc-mode --gpu-bdf=$gpu 2>&1)
+    output=$(python3 /usr/bin/gpu_cc_tool.py --query-cc-mode --gpu-bdf=$gpu 2>&1)
     if [ $? -ne 0 ]; then
         _exit_failed
     fi
@@ -386,7 +386,7 @@ set_gpu_cc_mode() {
     local mode=$CC_MODE
 
     if ! _assert_gpu_cc_mode $gpu $mode; then
-        output=$(python3 /usr/bin/nvidia-gpu-tools.py --set-cc-mode=$mode --reset-after-cc-mode-switch --gpu-bdf=$gpu 2>&1)
+        output=$(python3 /usr/bin/gpu_cc_tool.py --set-cc-mode=$mode --reset-after-cc-mode-switch --gpu-bdf=$gpu 2>&1)
         if [ $? -ne 0 ]; then
             echo "unable to set cc mode of gpu $gpu to $mode, output $output"
             return 1
@@ -434,7 +434,7 @@ get_cc_mode() {
 
 get_gpu_cc_mode() {
     local gpu=$1
-    output=$(python3 /usr/bin/nvidia-gpu-tools.py --query-cc-mode --gpu-bdf=$gpu 2>&1)
+    output=$(python3 /usr/bin/gpu_cc_tool.py --query-cc-mode --gpu-bdf=$gpu 2>&1)
     if [ $? -ne 0 ]; then
         echo "unable to get cc mode of gpu $gpu, output $output"
         return 1

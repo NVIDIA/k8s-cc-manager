@@ -84,6 +84,7 @@ $(BUILD_TARGETS): build-%:
 			--build-arg CUDA_VERSION="$(CUDA_VERSION)" \
 			--build-arg VERSION="$(VERSION)" \
 			--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
+			--build-arg GPU_ADMIN_TOOLS_VERSION="$(GPU_ADMIN_TOOLS_VERSION)" \
 			--file $(DOCKERFILE) \
 			$(CURDIR)
 

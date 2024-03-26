@@ -37,6 +37,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
 
 # Install Python Interpreter
 RUN dnf install -y python38 && pip3 install numpy
+RUN dnf install -y git
 
 LABEL io.k8s.display-name="NVIDIA Confidential Containers Manager for Kubernetes"
 LABEL name="NVIDIA Confidential Containers Manager for Kubernetes"
@@ -51,10 +52,10 @@ RUN mkdir /licenses && mv /NGC-DL-CONTAINER-LICENSE /licenses/NGC-DL-CONTAINER-L
 COPY --from=build /artifacts/k8s-cc-manager /usr/bin/k8s-cc-manager
 COPY --from=build /artifacts/kubectl /usr/bin/kubectl
 
+ARG GPU_ADMIN_TOOLS_VERSION
 # Setup CC tools and licenses
 COPY --from=build /artifacts/cc-manager.sh /usr/bin/cc-manager.sh
-RUN curl -o /usr/bin/gpu_cc_tool.py -L https://raw.githubusercontent.com/NVIDIA/nvtrust/main/host_tools/python/gpu_cc_tool.py && chmod a+x /usr/bin/gpu_cc_tool.py
-RUN curl -o /licenses/LICENSE.txt -L https://raw.githubusercontent.com/NVIDIA/nvtrust/main/host_tools/python/LICENSE.txt
+RUN git clone https://github.com/NVIDIA/gpu-admin-tools.git /usr/bin/gpu-admin-tools && chmod a+x /usr/bin/gpu-admin-tools/nvidia_gpu_tools.py
 
 # Install / upgrade packages here that are required to resolve CVEs
 ARG CVE_UPDATES

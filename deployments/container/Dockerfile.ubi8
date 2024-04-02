@@ -55,7 +55,7 @@ COPY --from=build /artifacts/kubectl /usr/bin/kubectl
 ARG GPU_ADMIN_TOOLS_VERSION
 # Setup CC tools and licenses
 COPY --from=build /artifacts/cc-manager.sh /usr/bin/cc-manager.sh
-RUN git clone https://github.com/NVIDIA/gpu-admin-tools.git /usr/bin/gpu-admin-tools && chmod a+x /usr/bin/gpu-admin-tools/nvidia_gpu_tools.py
+RUN git clone -b ${GPU_ADMIN_TOOLS_VERSION} https://github.com/NVIDIA/gpu-admin-tools.git /usr/bin/gpu-admin-tools && chmod a+x /usr/bin/gpu-admin-tools/nvidia_gpu_tools.py
 
 # Install / upgrade packages here that are required to resolve CVEs
 ARG CVE_UPDATES

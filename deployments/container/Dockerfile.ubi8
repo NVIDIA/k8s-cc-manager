@@ -36,8 +36,7 @@ RUN chmod a+x /artifacts/kubectl
 FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
 
 # Install Python Interpreter
-RUN dnf install -y python38 && pip3 install numpy
-RUN dnf install -y git
+RUN dnf install -y python38 git && pip3 install numpy
 
 LABEL io.k8s.display-name="NVIDIA Confidential Containers Manager for Kubernetes"
 LABEL name="NVIDIA Confidential Containers Manager for Kubernetes"

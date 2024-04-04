@@ -45,7 +45,21 @@ PUSH_TARGETS := $(patsubst %, push-%, $(DISTRIBUTIONS))
 BUILD_TARGETS := $(patsubst %, build-%, $(DISTRIBUTIONS))
 TEST_TARGETS := $(patsubst %, build-%, $(DISTRIBUTIONS))
 
-.PHONY: $(DISTRIBUTIONS) $(PUSH_TARGETS) $(BUILD_TARGETS) $(TEST_TARGETS)
+build:
+	go build ./...
+
+test:
+	go test ./...
+
+vendor:
+	go mod tidy
+	go mod vendor
+	go mod verify
+
+check-vendor: vendor
+	git diff --quiet HEAD -- go.mod go.sum vendor
+
+.PHONY: $(DISTRIBUTIONS) $(PUSH_TARGETS) $(BUILD_TARGETS) $(TEST_TARGETS) vendor check-vendor
 
 ifneq ($(BUILD_MULTI_ARCH_IMAGES),true)
 include $(CURDIR)/deployments/container/native-only.mk
@@ -66,7 +80,6 @@ endif
 
 push-%: DIST = $(*)
 push-short: DIST = $(DEFAULT_PUSH_TARGET)
-
 
 build-%: DIST = $(*)
 build-%: DOCKERFILE_SUFFIX = $(*)

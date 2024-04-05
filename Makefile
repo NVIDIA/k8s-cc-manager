@@ -12,20 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+GO_CMD ?= go
+GO_FMT ?= gofmt
+GO_SRC := $(shell find . -type f -name '*.go' -not -path "./vendor/*")
+
+BINARY_NAME ?= cc-manager
 
 build:
-	go build -o cc-manager ./...
+	${GO_CMD} build -o ${BINARY_NAME} ./...
 
 test:
-	go test ./...
+	${GO_CMD} test ./...
 
 vendor:
-	go mod tidy
-	go mod vendor
-	go mod verify
+	${GO_CMD} mod tidy
+	${GO_CMD} mod vendor
+	${GO_CMD} mod verify
 
 check-vendor: vendor
 	git diff --quiet HEAD -- go.mod go.sum vendor
 
-.PHONY: vendor check-vendor
-
+.PHONY: vendor check-vendor build test

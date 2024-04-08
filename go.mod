@@ -2,7 +2,7 @@ module github.com/NVIDIA/k8s-cc-manager
 
 go 1.21
 
-toolchain go1.22.2
+toolchain go1.21.5
 
 require (
 	github.com/sirupsen/logrus v1.9.3

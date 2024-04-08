@@ -82,6 +82,7 @@ $(BUILD_TARGETS): build-%:
 			--tag $(IMAGE) \
 			--build-arg BASE_DIST="$(DIST)" \
 			--build-arg CUDA_VERSION="$(CUDA_VERSION)" \
+			--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
 			--build-arg VERSION="$(VERSION)" \
 			--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
 			--build-arg GPU_ADMIN_TOOLS_VERSION="$(GPU_ADMIN_TOOLS_VERSION)" \

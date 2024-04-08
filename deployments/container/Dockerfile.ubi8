@@ -14,7 +14,7 @@
 
 ARG CUDA_VERSION
 ARG BASE_DIST
-ARG GOLANG_VERSION=1.20.2
+ARG GOLANG_VERSION
 
 FROM golang:${GOLANG_VERSION} AS build
 
@@ -27,7 +27,7 @@ COPY . .
 ARG VERSION="N/A"
 ARG GIT_COMMIT="unknown"
 
-RUN go build -o /artifacts/k8s-cc-manager ./cmd
+RUN CGO_ENABLED=0 go build -o /artifacts/k8s-cc-manager ./cmd
 RUN cp ./scripts/cc-manager.sh /artifacts/cc-manager.sh
 
 RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o /artifacts/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";

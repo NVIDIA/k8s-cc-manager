@@ -35,9 +35,8 @@ import (
 )
 
 const (
-	ResourceNodes        = "nodes"
-	CCModeConfigLabel    = "nvidia.com/cc.mode"
-	DefaultHostNvidiaDir = "/usr/local/nvidia"
+	ResourceNodes     = "nodes"
+	CCModeConfigLabel = "nvidia.com/cc.mode"
 )
 
 var (

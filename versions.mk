@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VERSION ?= v0.1.1
+VERSION ?= v0.1.2
 
 vVERSION := v$(VERSION:v%=%)
 
-CUDA_VERSION := 12.4.0
-GOLANG_VERSION ?= 1.21.5
+CUDA_VERSION := 12.5.1
+GOLANG_VERSION ?= 1.22.5
 
 GPU_ADMIN_TOOLS_VERSION := v2024.02.14

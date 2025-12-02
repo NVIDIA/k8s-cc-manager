@@ -1,0 +1,6 @@
+#!/bin/sh
+
+# Mimics the entrypoint used by existing gpu-operator manifest
+# To be deprecated when the manifest is adjusted
+# Run /app/main.py
+python3 /app/main.py

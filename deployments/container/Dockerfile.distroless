@@ -1,0 +1,58 @@
+# Multi-stage build for NVIDIA k8s-cc-manager Python implementation
+
+# Stage 1: Build dependencies
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG GPU_ADMIN_TOOLS_VERSION="v2025.10.20"
+# Copy requirements and install dependencies to a specific location
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/build/deps -r requirements.txt
+RUN git clone --branch ${GPU_ADMIN_TOOLS_VERSION} https://github.com/NVIDIA/gpu-admin-tools.git
+
+# Stage 2: Distroless runtime
+# Note: using dev version until gpu-operator is updated not to use
+# hardcoded command.
+FROM nvcr.io/nvidia/distroless/python:3.13-v3.1.1-dev
+
+# Copy Python dependencies from builder
+COPY --from=builder /build/deps /usr/local
+
+# Copy application code
+COPY main.py /app/
+COPY gpu_operator_eviction.py /app/
+
+# TODO: eliminate this when dev version is removed
+COPY scripts/k8s-cc-manager /usr/bin/
+
+# Copy gpu-admin-tools from source tree
+COPY --from=builder /build/gpu-admin-tools /app/gpu-admin-tools
+
+WORKDIR /app
+
+# Set PYTHONPATH to find installed packages
+ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
+
+# Run as non-root (distroless default)
+USER 0:0
+SHELL ["/busybox/sh", "-c"]
+RUN ln -s /busybox/sh /bin/sh
+ARG VERSION="N/A"
+ARG GIT_COMMIT="unknown"
+
+LABEL io.k8s.display-name="NVIDIA CC Manager"
+LABEL name="NVIDIA CC Manager"
+LABEL vendor="NVIDIA"
+LABEL version=${VERSION}
+LABEL com.nvidia.git-commit=${GIT_COMMIT}
+LABEL release="N/A"
+LABEL summary="NVIDIA Confidential Compute Manager for Kubernetes"
+LABEL description="See summary"
+
+ENTRYPOINT ["python3", "/app/main.py"]

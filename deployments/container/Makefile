@@ -38,8 +38,8 @@ OUT_IMAGE_TAG = $(OUT_IMAGE_VERSION)-$(DIST)
 OUT_IMAGE = $(OUT_IMAGE_NAME):$(OUT_IMAGE_TAG)
 
 ##### Public rules #####
-DISTRIBUTIONS := ubi8
-DEFAULT_PUSH_TARGET := ubi8
+DISTRIBUTIONS := distroless
+DEFAULT_PUSH_TARGET := distroless
 
 PUSH_TARGETS := $(patsubst %, push-%, $(DISTRIBUTIONS))
 BUILD_TARGETS := $(patsubst %, build-%, $(DISTRIBUTIONS))

@@ -14,6 +14,9 @@ ARG GPU_ADMIN_TOOLS_VERSION="v2025.10.20"
 # Copy requirements and install dependencies to a specific location
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/build/deps -r requirements.txt
+# upgrade urllib3 to address CVE.
+# Also see https://github.com/kubernetes-client/python/issues/2477#issuecomment-3628140179
+RUN pip install --upgrade --no-warn-conflicts urllib3==2.6.1
 RUN git clone --branch ${GPU_ADMIN_TOOLS_VERSION} https://github.com/NVIDIA/gpu-admin-tools.git
 
 # Stage 2: Distroless runtime

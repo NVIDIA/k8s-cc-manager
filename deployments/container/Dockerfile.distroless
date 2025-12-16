@@ -1,7 +1,7 @@
 # Multi-stage build for NVIDIA k8s-cc-manager Python implementation
 
 # Stage 1: Build dependencies
-FROM python:3.11-slim AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /build
 
@@ -40,12 +40,16 @@ COPY --from=builder /build/gpu-admin-tools /app/gpu-admin-tools
 WORKDIR /app
 
 # Set PYTHONPATH to find installed packages
-ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
+ENV PYTHONPATH=/usr/local/lib/python3.13/site-packages
 
 # Run as non-root (distroless default)
 USER 0:0
 SHELL ["/busybox/sh", "-c"]
 RUN ln -s /busybox/sh /bin/sh
+
+# clean up left over dist-info
+RUN rm -rf /usr/local/lib/python3.13/site-packages/urllib3-2.3.0.dist-info
+
 ARG VERSION="N/A"
 ARG GIT_COMMIT="unknown"
 

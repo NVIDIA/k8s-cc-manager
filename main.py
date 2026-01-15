@@ -115,51 +115,106 @@ class CCManager:
         self.v1 = client.CoreV1Api()
         logger.info(f"Initialized CC Manager for node: {node_name}")
         logger.info(f"Default CC mode: {default_mode or '(none)'}")
-    
+
+    def find_nvidia_devices(self) -> tuple:
+        """
+        Find all NVIDIA devices on the node.
+
+        This is a wrapper around find_gpus() which, despite its name, returns
+        all NVIDIA PCI devices including both GPUs (class 0x030000/0x030200)
+        and NVSwitches (class 0x068000).
+
+        Returns:
+            Tuple of (devices, count) where devices is a list of device objects
+        """
+        return find_gpus()
+
+    def get_gpus(self) -> list:
+        """
+        Get all NVIDIA GPUs on the node.
+
+        Returns:
+            List of GPU objects (excludes NVSwitches)
+        """
+        devices, _ = self.find_nvidia_devices()
+        return [d for d in devices if d.is_gpu()]
+
+    def get_nvswitches(self) -> list:
+        """
+        Get all NVIDIA NVSwitches on the node.
+
+        Returns:
+            List of NVSwitch objects (excludes GPUs)
+        """
+        devices, _ = self.find_nvidia_devices()
+        return [d for d in devices if d.is_nvswitch()]
+
     def get_cc_capable_gpus(self) -> list:
         """
         Discover CC-capable GPUs on the node.
-        
+
         Returns:
             List of Gpu objects for CC-capable GPUs
         """
         cc_gpus = []
-        gpus, _ = find_gpus()
-        for gpu in gpus:
-            # Verify CC is supported
+        for gpu in self.get_gpus():
             if not gpu.is_cc_query_supported:
                 logger.warning(f"GPU {gpu.bdf} does not support CC mode query")
                 continue
-            
+
             cc_gpus.append(gpu)
             logger.info(f"Found CC-capable GPU: {gpu.bdf} - {gpu.name}")
-                
+
         return cc_gpus
+
+    def get_ppcie_capable_devices(self) -> list:
+        """
+        Discover PPCIe-capable devices (GPUs and NVSwitches) on the node.
+
+        Returns:
+            List of device objects (Gpu/NVSwitch) that support PPCIe mode
+        """
+        ppcie_devices = []
+        devices, _ = self.find_nvidia_devices()
+        for device in devices:
+            if not device.is_ppcie_query_supported:
+                logger.warning(f"Device {device.bdf} does not support PPCIe mode query")
+                continue
+
+            ppcie_devices.append(device)
+            logger.info(f"Found PPCIe-capable device: {device.bdf} - {device.name}")
+
+        return ppcie_devices
     
     def set_cc_mode(self, mode: str) -> bool:
         """
-        Set CC mode on all GPUs.
-        
+        Set CC/PPCIe mode on all GPUs/devices.
+
         Args:
-            mode: Desired CC mode (e.g., 'on', 'off', 'devtools')
-            
+            mode: Desired mode (e.g., 'on', 'off', 'devtools', 'ppcie')
+
         Returns:
             True if successful, False otherwise
         """
-        gpus, _ = find_gpus()
+        # Route ppcie mode to dedicated handler
+        if mode == 'ppcie':
+            return self.set_ppcie_mode()
+
+        # CC mode only applies to GPUs
+        gpus = self.get_gpus()
         cc_gpus = self.get_cc_capable_gpus()
 
-        # If the mode is not off and some of the devices are not cc-capable,
+        # If the mode is not off and some of the GPUs are not cc-capable,
         # bail out here.
         if mode != 'off':
             if len(gpus) != len(cc_gpus):
-                logger.error(f"Some GPUs are not cc-capable: {set(gpus) - set(cc_gpus)}")
+                logger.error(f"Some GPUs are not cc-capable: {set(g.bdf for g in gpus) - set(g.bdf for g in cc_gpus)}")
                 sys.exit(1)
 
         if not gpus:
             logger.warning("No GPUs to configure")
             return True
-        
+
         if not mode:
             logger.info("No CC mode specified, skipping")
             return True
@@ -173,6 +228,169 @@ class CCManager:
             return self._set_cc_mode_with_eviction(gpus, mode)
 
         return self._set_cc_mode_direct(gpus, mode)
+
+    def set_ppcie_mode(self) -> bool:
+        """
+        Set Protected PCIe (Multi-GPU) mode on all devices.
+
+        This enables PPCIe mode on all GPUs and NVSwitches. Before enabling PPCIe,
+        CC mode must be disabled on all devices.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        devices, _ = self.find_nvidia_devices()
+        ppcie_devices = self.get_ppcie_capable_devices()
+
+        # All devices must support PPCIe
+        if len(devices) != len(ppcie_devices):
+            non_ppcie = set(d.bdf for d in devices) - set(d.bdf for d in ppcie_devices)
+            logger.error(f"Some devices do not support PPCIe mode: {non_ppcie}")
+            sys.exit(1)
+
+        if not devices:
+            logger.warning("No devices to configure for PPCIe mode")
+            return True
+
+        if self.ppcie_mode_is_set(devices):
+            logger.info("All devices already in PPCIe mode, skipping")
+            set_cc_mode_state_label(self.v1, self.node_name, 'ppcie')
+            return True
+
+        if self.evict_operator_components:
+            return self._set_ppcie_mode_with_eviction(devices)
+
+        return self._set_ppcie_mode_direct(devices)
+
+    def ppcie_mode_is_set(self, devices: list) -> bool:
+        """
+        Checks if PPCIe mode is already set on all devices.
+
+        Args:
+            devices: List of device objects (Gpu/NvSwitch)
+
+        Returns:
+            True if already set, False otherwise
+        """
+        for device in devices:
+            try:
+                if device.query_ppcie_mode() != 'on':
+                    return False
+            except Exception as e:
+                logger.error(f"Unexpected error getting PPCIe mode on {device.bdf}: {e}")
+                return False
+        return True
+
+    def _set_ppcie_mode_direct(self, devices: list) -> bool:
+        """
+        Set PPCIe mode on all GPUs and NVSwitches.
+
+        Per the NVIDIA deployment guide, PPCIe mode must be set on all devices
+        in the NVLink fabric together for proper multi-GPU operation. This method:
+        1. Ensures CC mode is off on all GPUs (prerequisite for PPCIe)
+        2. Sets PPCIe mode on all devices first (without resetting)
+        3. Resets all devices together to apply the configuration atomically
+        4. Verifies PPCIe mode is active on all devices
+
+        Args:
+            devices: List of device objects (Gpu/NvSwitch)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        logger.info(f"Setting PPCIe mode on {len(devices)} device(s)")
+
+        try:
+            # Phase 1: Ensure PPCIe mode is off on all devices first
+            # Per deployment guide: --set-ppcie-mode=off on all devices
+            for device in devices:
+                current_mode = device.query_ppcie_mode()
+                if current_mode == 'off':
+                    logger.info(f"Device {device.bdf} PPCIe mode already off")
+                    continue
+                logger.info(f"Setting PPCIe mode off on {device.bdf} (current: {current_mode})")
+                device.set_ppcie_mode('off')
+                device.reset_with_os()
+                device.wait_for_boot()
+
+            # Phase 2: Set PPCIe mode on ALL devices first (without reset)
+            # This ensures the configuration is staged on all devices before activation
+            devices_to_reset = []
+            for device in devices:
+                current_mode = device.query_ppcie_mode()
+                if current_mode == 'on':
+                    logger.info(f"Device {device.bdf} already in PPCIe mode")
+                    continue
+
+                logger.info(f"Setting PPCIe mode on {device.bdf} from '{current_mode}' to 'on'")
+                device.set_ppcie_mode('on')
+                devices_to_reset.append(device)
+
+            # Phase 3: Reset all devices together to apply PPCIe mode atomically
+            # This ensures the NVLink fabric is configured consistently
+            if devices_to_reset:
+                logger.info(f"Resetting {len(devices_to_reset)} device(s) to apply PPCIe mode")
+                for device in devices_to_reset:
+                    logger.info(f"Resetting device {device.bdf}")
+                    device.reset_with_os()
+
+                # Phase 4: Wait for all devices to boot and verify
+                for device in devices_to_reset:
+                    device.wait_for_boot()
+                    new_mode = device.query_ppcie_mode()
+                    if new_mode != 'on':
+                        raise RuntimeError(
+                            f"PPCIe mode verification failed on {device.bdf}: expected 'on', got '{new_mode}'"
+                        )
+                    logger.info(f"Verified PPCIe mode on {device.bdf}")
+
+        except GpuError as e:
+            logger.error(f"GPU error setting PPCIe mode: {e}")
+            set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error setting PPCIe mode: {e}")
+            set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+            return False
+
+        logger.info("Successfully set PPCIe mode on all devices")
+        set_cc_mode_state_label(self.v1, self.node_name, 'ppcie')
+        return True
+
+    def _set_ppcie_mode_with_eviction(self, devices: list) -> bool:
+        """
+        Evict GPU components, set PPCIe mode on all specified devices,
+        reschedule components.
+
+        Args:
+            devices: List of device objects (Gpu/NvSwitch)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        component_labels = fetch_current_component_labels(self.v1, self.node_name)
+        logger.info("Evicting GPU operator components before PPCIe mode change")
+        if not evict_gpu_operator_components(
+            self.v1,
+            self.node_name,
+            self.operator_namespace,
+            component_labels,
+            timeout=300
+        ):
+            logger.error("Failed to evict GPU operator components")
+            return False
+
+        result = self._set_ppcie_mode_direct(devices)
+        logger.info("Rescheduling GPU operator components")
+        if not reschedule_gpu_operator_components(
+            self.v1,
+            self.node_name,
+            component_labels
+        ):
+            logger.error("Failed to reschedule GPU operator components")
+            result = False
+
+        return result
         
     def mode_is_set(self, gpus: list, mode: str) -> bool:
         """
@@ -199,6 +417,10 @@ class CCManager:
         """
         Set CC mode on all specified GPUs.
 
+        When setting CC mode ('on' or 'off'), PPCIe mode must be disabled on
+        all devices (GPUs and NVSwitches). Per the deployment guide, all NVIDIA
+        devices must not be in PPCIe mode before switching to CC mode.
+
         Args:
             gpus: List of Gpu objects
             mode: Desired CC mode (e.g., 'on', 'off', 'devtools')
@@ -207,7 +429,32 @@ class CCManager:
             True if successful, False otherwise
         """
         logger.info(f"Setting CC mode to '{mode}' on {len(gpus)} GPU(s)")
-        
+
+        # When setting CC mode on or off, disable PPCIe mode on all devices
+        # (both GPUs and NVSwitches) first. Per deployment guide: all NVIDIA
+        # devices must not be in PPCIe mode before switching to CC mode.
+        if mode in ('on', 'off'):
+            all_devices, _ = self.find_nvidia_devices()
+            for device in all_devices:
+                try:
+                    if not device.is_ppcie_query_supported:
+                        continue
+                    current_ppcie = device.query_ppcie_mode()
+                    if current_ppcie != 'off':
+                        logger.info(f"Disabling PPCIe mode on {device.bdf} (cc.mode={mode})")
+                        device.set_ppcie_mode('off')
+                        device.reset_with_os()
+                        device.wait_for_boot()
+                        logger.info(f"PPCIe mode disabled on {device.bdf}")
+                except GpuError as e:
+                    logger.error(f"Failed to disable PPCIe mode on {device.bdf}: {e}")
+                    set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+                    return False
+                except Exception as e:
+                    logger.error(f"Unexpected error disabling PPCIe mode on {device.bdf}: {e}")
+                    set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+                    return False
+
         for gpu in gpus:
             try:
                 # Check current mode
@@ -417,7 +664,8 @@ def main():
     parser.add_argument(
         '--default-cc-mode', '-m',
         default=os.environ.get('DEFAULT_CC_MODE', 'on'),
-        help='CC mode to be set by default when node label nvidia.com/cc.mode is not applied'
+        help="CC mode to be set by default when node label nvidia.com/cc.mode is not applied. "
+             "Valid modes: 'on', 'off', 'devtools', 'ppcie' (Protected PCIe Multi-GPU mode)"
     )
     parser.add_argument(
         '--node-name',

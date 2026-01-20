@@ -417,9 +417,13 @@ class CCManager:
         """
         Set CC mode on all specified GPUs.
 
-        When setting CC mode ('on' or 'off'), PPCIe mode must be disabled on
-        all devices (GPUs and NVSwitches). Per the deployment guide, all NVIDIA
-        devices must not be in PPCIe mode before switching to CC mode.
+        When setting CC mode ('on', 'off', or 'devtools'), PPCIe mode must be
+        disabled on all devices (GPUs and NVSwitches) first. This method uses
+        a batch approach for efficiency:
+        1. Disable PPCIe mode on all devices that need it (set all, reset all, verify)
+        2. Set CC mode on all GPUs (without resetting)
+        3. Reset all GPUs together
+        4. Verify CC mode on all GPUs
 
         Args:
             gpus: List of Gpu objects
@@ -430,69 +434,76 @@ class CCManager:
         """
         logger.info(f"Setting CC mode to '{mode}' on {len(gpus)} GPU(s)")
 
-        # When setting CC mode on or off, disable PPCIe mode on all devices
-        # (both GPUs and NVSwitches) first. Per deployment guide: all NVIDIA
-        # devices must not be in PPCIe mode before switching to CC mode.
-        if mode in ('on', 'off'):
+        try:
+            # Phase 1: Disable PPCIe mode on all devices first (batch approach)
+            # Per deployment guide: all NVIDIA devices must not be in PPCIe mode
             all_devices, _ = self.find_nvidia_devices()
-            for device in all_devices:
-                try:
-                    if not device.is_ppcie_query_supported:
-                        continue
-                    current_ppcie = device.query_ppcie_mode()
-                    if current_ppcie != 'off':
-                        logger.info(f"Disabling PPCIe mode on {device.bdf} (cc.mode={mode})")
-                        device.set_ppcie_mode('off')
-                        device.reset_with_os()
-                        device.wait_for_boot()
-                        logger.info(f"PPCIe mode disabled on {device.bdf}")
-                except GpuError as e:
-                    logger.error(f"Failed to disable PPCIe mode on {device.bdf}: {e}")
-                    set_cc_mode_state_label(self.v1, self.node_name, 'failed')
-                    return False
-                except Exception as e:
-                    logger.error(f"Unexpected error disabling PPCIe mode on {device.bdf}: {e}")
-                    set_cc_mode_state_label(self.v1, self.node_name, 'failed')
-                    return False
+            devices_to_reset_ppcie = []
 
-        for gpu in gpus:
-            try:
-                # Check current mode
+            for device in all_devices:
+                if not device.is_ppcie_query_supported:
+                    continue
+                current_ppcie = device.query_ppcie_mode()
+                if current_ppcie != 'off':
+                    logger.info(f"Setting PPCIe mode off on {device.bdf} (current: {current_ppcie})")
+                    device.set_ppcie_mode('off')
+                    devices_to_reset_ppcie.append(device)
+
+            # Reset all devices that had PPCIe mode changed
+            if devices_to_reset_ppcie:
+                logger.info(f"Resetting {len(devices_to_reset_ppcie)} device(s) to disable PPCIe mode")
+                for device in devices_to_reset_ppcie:
+                    logger.info(f"Resetting device {device.bdf}")
+                    device.reset_with_os()
+
+                # Wait for all devices to boot and verify PPCIe is off
+                for device in devices_to_reset_ppcie:
+                    device.wait_for_boot()
+                    new_ppcie = device.query_ppcie_mode()
+                    if new_ppcie != 'off':
+                        raise RuntimeError(
+                            f"PPCIe mode disable failed on {device.bdf}: expected 'off', got '{new_ppcie}'"
+                        )
+                    logger.info(f"PPCIe mode disabled on {device.bdf}")
+
+            # Phase 2: Set CC mode on all GPUs (without resetting)
+            gpus_to_reset = []
+            for gpu in gpus:
                 current_mode = gpu.query_cc_mode()
                 if current_mode == mode:
-                    logger.info(f"GPU {gpu.bdf} already in CC mode '{mode}', skipping")
+                    logger.info(f"GPU {gpu.bdf} already in CC mode '{mode}'")
                     continue
-                
+
                 logger.info(f"Setting CC mode on GPU {gpu.bdf} from '{current_mode}' to '{mode}'")
-                
-                # Set CC mode
                 gpu.set_cc_mode(mode)
-                
-                # Reset GPU to apply the mode (uses sysfs reset on Linux)
-                logger.info(f"Resetting GPU {gpu.bdf} to apply CC mode")
-                gpu.reset_with_os()
-                
-                # Wait for GPU to boot up after reset
-                gpu.wait_for_boot()
-                
-                # Verify the mode was set
-                new_mode = gpu.query_cc_mode()
-                if new_mode != mode:
-                    raise RuntimeError(
-                        f"CC mode verification failed: expected '{mode}', got '{new_mode}'"
-                    )
-                
-                logger.info(f"Successfully set CC mode to '{mode}' on GPU {gpu.bdf}")
-                
-            except GpuError as e:
-                logger.error(f"GPU error setting CC mode on {gpu.bdf}: {e}")
-                set_cc_mode_state_label(self.v1, self.node_name, 'failed')
-                return False
-            except Exception as e:
-                logger.error(f"Unexpected error setting CC mode on {gpu.bdf}: {e}")
-                set_cc_mode_state_label(self.v1, self.node_name, 'failed')
-                return False
-        
+                gpus_to_reset.append(gpu)
+
+            # Phase 3: Reset all GPUs together to apply CC mode
+            if gpus_to_reset:
+                logger.info(f"Resetting {len(gpus_to_reset)} GPU(s) to apply CC mode")
+                for gpu in gpus_to_reset:
+                    logger.info(f"Resetting GPU {gpu.bdf}")
+                    gpu.reset_with_os()
+
+                # Phase 4: Wait for all GPUs to boot and verify CC mode
+                for gpu in gpus_to_reset:
+                    gpu.wait_for_boot()
+                    new_mode = gpu.query_cc_mode()
+                    if new_mode != mode:
+                        raise RuntimeError(
+                            f"CC mode verification failed on {gpu.bdf}: expected '{mode}', got '{new_mode}'"
+                        )
+                    logger.info(f"Verified CC mode '{mode}' on GPU {gpu.bdf}")
+
+        except GpuError as e:
+            logger.error(f"GPU error setting CC mode: {e}")
+            set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error setting CC mode: {e}")
+            set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+            return False
+
         logger.info(f"Successfully set CC mode to '{mode}' on all GPUs")
         set_cc_mode_state_label(self.v1, self.node_name, mode)
         return True

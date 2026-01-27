@@ -16,13 +16,17 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/build/deps -r requirements.txt
 # upgrade urllib3 to address CVE.
 # Also see https://github.com/kubernetes-client/python/issues/2477#issuecomment-3628140179
-RUN pip install --upgrade --no-cache-dir --no-warn-conflicts --prefix=/build/deps urllib3==2.6.1
+RUN pip install --upgrade --no-cache-dir --no-warn-conflicts --prefix=/build/deps urllib3==2.6.3
+
 RUN git clone --branch ${GPU_ADMIN_TOOLS_VERSION} https://github.com/NVIDIA/gpu-admin-tools.git
 
-# Stage 2: Distroless runtime
+# Stage 2
+FROM nvcr.io/nvidia/distroless/python:3.13-v4.0.0-dev AS stg2
+
+# Stage 3: Distroless runtime
 # Note: using dev version until gpu-operator is updated not to use
 # hardcoded command.
-FROM nvcr.io/nvidia/distroless/python:3.13-v3.1.1-dev
+FROM nvcr.io/nvidia/distroless/python:3.13-v4.0.0
 
 # Copy Python dependencies from builder
 COPY --from=builder /build/deps /usr/local
@@ -31,11 +35,11 @@ COPY --from=builder /build/deps /usr/local
 COPY main.py /app/
 COPY gpu_operator_eviction.py /app/
 
-# TODO: eliminate this when dev version is removed
-COPY scripts/k8s-cc-manager /usr/bin/
-
 # Copy gpu-admin-tools from source tree
 COPY --from=builder /build/gpu-admin-tools /app/gpu-admin-tools
+
+# Copy rm for the preStop hook
+COPY --from=stg2 /busybox/rm /bin
 
 WORKDIR /app
 
@@ -44,11 +48,8 @@ ENV PYTHONPATH=/usr/local/lib/python3.13/site-packages
 
 # Run as non-root (distroless default)
 USER 0:0
-SHELL ["/busybox/sh", "-c"]
-RUN ln -s /busybox/sh /bin/sh
-
 # clean up left over dist-info
-RUN rm -rf /usr/local/lib/python3.13/site-packages/urllib3-2.3.0.dist-info
+RUN ["/bin/rm", "-rf", "/usr/local/lib/python3.13/site-packages/urllib3-2.3.0.dist-info"]
 
 ARG VERSION="N/A"
 ARG GIT_COMMIT="unknown"

@@ -20,12 +20,14 @@ RUN pip install --upgrade --no-cache-dir --no-warn-conflicts --prefix=/build/dep
 
 RUN git clone --branch ${GPU_ADMIN_TOOLS_VERSION} https://github.com/NVIDIA/gpu-admin-tools.git
 
-# Stage 2
-FROM nvcr.io/nvidia/distroless/python:3.13-v4.0.0-dev AS stg2
+# Stage 2 build rm utility
+FROM alpine:3.21 AS stg2
+RUN apk add --no-cache musl-dev gcc
+WORKDIR /build
+COPY rmsrc/rm.c rm.c
+RUN gcc -static -Os rm.c -o rm
 
 # Stage 3: Distroless runtime
-# Note: using dev version until gpu-operator is updated not to use
-# hardcoded command.
 FROM nvcr.io/nvidia/distroless/python:3.13-v4.0.0
 
 # Copy Python dependencies from builder
@@ -39,7 +41,7 @@ COPY gpu_operator_eviction.py /app/
 COPY --from=builder /build/gpu-admin-tools /app/gpu-admin-tools
 
 # Copy rm for the preStop hook
-COPY --from=stg2 /busybox/rm /bin
+COPY --from=stg2 /build/rm /bin/rm
 
 WORKDIR /app
 

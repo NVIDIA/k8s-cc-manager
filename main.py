@@ -33,6 +33,8 @@ sys.path.insert(0, str(GPU_ADMIN_TOOLS_PATH))
 from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
 
+from cpuinfo import get_cpu_info
+
 # Import gpu-admin-tools
 try:
     from nvidia_gpu_tools import Gpu
@@ -47,7 +49,7 @@ from gpu_operator_eviction import (
     fetch_current_component_labels,
     evict_gpu_operator_components,
     reschedule_gpu_operator_components,
-    set_cc_mode_state_label
+    set_cc_state_label
 )
 
 # Configure logging
@@ -77,11 +79,26 @@ def create_readiness_file():
         logger.warning(f"Failed to create readiness file {READINESS_FILE}: {e}")
         # Don't fail the application if readiness file can't be created
 
+def is_host_cc_enabled() -> bool:
+    """
+    Checks whether the host is cc enabled
+
+    Returns:
+        boolean status
+    """
+    info = get_cpu_info()
+    flags = info.get('flags', [])
+
+    # Check for specific CoCo indicators
+    is_sev = 'sev' in flags
+    is_tdx = 'tdx' in flags
+
+    return is_sev or is_tdx
 
 class CCManager:
     """Manages NVIDIA GPU Confidential Computing mode based on Kubernetes node labels."""
     
-    def __init__(self, node_name: str, default_mode: str = ''):
+    def __init__(self, node_name: str, default_mode: str, host_cc: bool):
         """
         Initialize the CC Manager.
         
@@ -95,6 +112,7 @@ class CCManager:
         ).lower() == 'true'
         self.node_name = node_name
         self.default_mode = default_mode
+        self.host_cc_capable = host_cc
         self.current_label = None
         self.current_rv = None
         self.last_label = None
@@ -196,6 +214,9 @@ class CCManager:
         Returns:
             True if successful, False otherwise
         """
+        if not self.host_cc_capable and mode != 'off':
+            logger.warning(f"Host doesn't have CC, gpu mode {mode} specified")
+
         # Route ppcie mode to dedicated handler
         if mode == 'ppcie':
             return self.set_ppcie_mode()
@@ -219,15 +240,20 @@ class CCManager:
             logger.info("No CC mode specified, skipping")
             return True
 
-        if self.mode_is_set(gpus, mode):
+        # no cc gpus are present, reflect state and return
+        if not cc_gpus:
+            set_cc_state_label(self.v1, self.node_name, 'off')
+            return True
+
+        if self.mode_is_set(cc_gpus, mode):
             logger.info(f"All gpus already set to cc {mode}, skipping")
-            set_cc_mode_state_label(self.v1, self.node_name, mode)
+            set_cc_state_label(self.v1, self.node_name, mode)
             return True
 
         if self.evict_operator_components:
-            return self._set_cc_mode_with_eviction(gpus, mode)
+            return self._set_cc_mode_with_eviction(cc_gpus, mode)
 
-        return self._set_cc_mode_direct(gpus, mode)
+        return self._set_cc_mode_direct(cc_gpus, mode)
 
     def set_ppcie_mode(self) -> bool:
         """
@@ -254,7 +280,7 @@ class CCManager:
 
         if self.ppcie_mode_is_set(devices):
             logger.info("All devices already in PPCIe mode, skipping")
-            set_cc_mode_state_label(self.v1, self.node_name, 'ppcie')
+            set_cc_state_label(self.v1, self.node_name, 'ppcie')
             return True
 
         if self.evict_operator_components:
@@ -346,15 +372,15 @@ class CCManager:
 
         except GpuError as e:
             logger.error(f"GPU error setting PPCIe mode: {e}")
-            set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+            set_cc_state_label(self.v1, self.node_name, 'failed')
             return False
         except Exception as e:
             logger.error(f"Unexpected error setting PPCIe mode: {e}")
-            set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+            set_cc_state_label(self.v1, self.node_name, 'failed')
             return False
 
         logger.info("Successfully set PPCIe mode on all devices")
-        set_cc_mode_state_label(self.v1, self.node_name, 'ppcie')
+        set_cc_state_label(self.v1, self.node_name, 'ppcie')
         return True
 
     def _set_ppcie_mode_with_eviction(self, devices: list) -> bool:
@@ -497,15 +523,15 @@ class CCManager:
 
         except GpuError as e:
             logger.error(f"GPU error setting CC mode: {e}")
-            set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+            set_cc_state_label(self.v1, self.node_name, 'failed')
             return False
         except Exception as e:
             logger.error(f"Unexpected error setting CC mode: {e}")
-            set_cc_mode_state_label(self.v1, self.node_name, 'failed')
+            set_cc_state_label(self.v1, self.node_name, 'failed')
             return False
 
         logger.info(f"Successfully set CC mode to '{mode}' on all GPUs")
-        set_cc_mode_state_label(self.v1, self.node_name, mode)
+        set_cc_state_label(self.v1, self.node_name, mode)
         return True
             
     def _set_cc_mode_with_eviction(self, gpus: list, mode: str) -> bool:
@@ -700,11 +726,20 @@ def main():
         logger.error("NODE_NAME environment variable must be set for k8s-cc-manager")
         sys.exit(1)
     
+    # if the default cc mode is on, but the host is not cc, override default
+    default_cc_mode = args.default_cc_mode
+    host_cc = is_host_cc_enabled()
+    if not host_cc:
+        default_cc_mode = 'off'
+        if args.default_cc_mode != 'off':
+            logger.warning(f"Overriding default CC mode: {args.default_cc_mode} to off because the host does not support CC")
+
     # Create and run the manager
     try:
         manager = CCManager(
             node_name=args.node_name,
-            default_mode=args.default_cc_mode
+            default_mode=default_cc_mode,
+            host_cc=host_cc
         )
         
         manager.run()

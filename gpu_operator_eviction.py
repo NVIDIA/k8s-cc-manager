@@ -259,9 +259,10 @@ def reschedule_gpu_operator_components(
         return False
 
 
-def set_cc_mode_state_label(v1: client.CoreV1Api, node_name: str, state: str) -> bool:
+def set_cc_state_label(v1: client.CoreV1Api, node_name: str, state: str) -> bool:
     """
-    Set the nvidia.com/cc.mode.state label on the node.
+    Set the nvidia.com/cc.mode.state and nvidia.com/cc.ready.state labels
+    on the node.
     
     Args:
         v1: Kubernetes CoreV1Api client
@@ -271,14 +272,22 @@ def set_cc_mode_state_label(v1: client.CoreV1Api, node_name: str, state: str) ->
     Returns:
         True if successful, False otherwise
     """
+    ready = ""
+    if state in ["on", "ppcie"]:
+        ready = "true"
+    elif state == "off":
+        ready = "false"
+
     try:
         node = v1.read_node(node_name)
         if node.metadata.labels is None:
             node.metadata.labels = {}
         
         node.metadata.labels['nvidia.com/cc.mode.state'] = state
+        node.metadata.labels['nvidia.com/cc.ready.state'] = ready
         v1.patch_node(node_name, node)
-        logger.info(f"Set nvidia.com/cc.mode.state={state}")
+        logger.info(f"Set nvidia.com/cc.mode.state={state}, "
+                    f"nvidia.com/cc.ready.state={ready}")
         return True
         
     except ApiException as e:

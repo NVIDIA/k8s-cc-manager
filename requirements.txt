@@ -1,2 +1,3 @@
 # Kubernetes Python Client
 kubernetes>=28.1.0
+py-cpuinfo

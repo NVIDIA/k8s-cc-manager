@@ -267,7 +267,7 @@ def set_cc_state_label(v1: client.CoreV1Api, node_name: str, state: str) -> bool
     Args:
         v1: Kubernetes CoreV1Api client
         node_name: Name of the node
-        state: State value ('success' or 'failed')
+        state: State value
         
     Returns:
         True if successful, False otherwise

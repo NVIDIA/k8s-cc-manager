@@ -86,7 +86,12 @@ def is_host_cc_enabled() -> bool:
     Returns:
         boolean status
     """
-    info = get_cpu_info()
+    try:
+        info = get_cpu_info()
+    except Exception as e:
+        logger.error(f"Failed to get CPU info for CC detection: {e}")
+        return False
+
     flags = info.get('flags', [])
 
     # Check for specific CoCo indicators

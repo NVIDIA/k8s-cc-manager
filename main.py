@@ -33,8 +33,6 @@ sys.path.insert(0, str(GPU_ADMIN_TOOLS_PATH))
 from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
 
-from cpuinfo import get_cpu_info
-
 # Import gpu-admin-tools
 try:
     from nvidia_gpu_tools import Gpu
@@ -86,19 +84,23 @@ def is_host_cc_enabled() -> bool:
     Returns:
         boolean status
     """
-    try:
-        info = get_cpu_info()
-    except Exception as e:
-        logger.error(f"Failed to get CPU info for CC detection: {e}")
-        return False
+    # 1. Check Intel TDX Host Status
+    # Verify kvm_intel is loaded with tdx=1 and module is initialized
+    tdx_param = "/sys/module/kvm_intel/parameters/tdx"
+    if os.path.exists(tdx_param):
+        with open(tdx_param, "r") as f:
+            if f.read().strip().lower() in ['y', '1']:
+                return True
 
-    flags = info.get('flags', [])
+    # 2. Check AMD SEV-SNP Host Status
+    # Verify kvm_amd is loaded with sev_snp enabled
+    snp_param = "/sys/module/kvm_amd/parameters/sev_snp"
+    if os.path.exists(snp_param):
+        with open(snp_param, "r") as f:
+            if f.read().strip().lower() in ['y', '1']:
+                return True
 
-    # Check for specific CoCo indicators
-    is_sev = 'sev' in flags
-    is_tdx = 'tdx' in flags
-
-    return is_sev or is_tdx
+    return False
 
 class CCManager:
     """Manages NVIDIA GPU Confidential Computing mode based on Kubernetes node labels."""

@@ -2,13 +2,6 @@
 
 # Stage 1: Build dependencies
 FROM python:3.13-slim AS builder
-# build args for proxy
-ARG PIP_INDEX_URL=https://urm.nvidia.com/artifactory/api/pypi/pypi-remote/simple
-ARG PIP_TRUSTED_HOST=urm.nvidia.com
-
-# Environment variables derived from ARGs
-ENV PIP_INDEX_URL=$PIP_INDEX_URL
-ENV PIP_TRUSTED_HOST=$PIP_TRUSTED_HOST
 
 WORKDIR /build
 

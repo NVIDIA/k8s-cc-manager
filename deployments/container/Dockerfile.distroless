@@ -1,4 +1,5 @@
 # Multi-stage build for NVIDIA k8s-cc-manager Python implementation
+ARG RUNTIME_VERSION="3.13-v4.0.2"
 
 # Stage 1: Build dependencies
 FROM python:3.13-slim AS builder
@@ -28,7 +29,8 @@ COPY rmsrc/rm.c rm.c
 RUN gcc -static -Os rm.c -o rm
 
 # Stage 3: Distroless runtime
-FROM nvcr.io/nvidia/distroless/python:3.13-v4.0.0
+FROM nvcr.io/nvidia/distroless/python:${RUNTIME_VERSION}
+ARG RUNTIME_VERSION
 
 # Copy Python dependencies from builder
 COPY --from=builder /build/deps /usr/local

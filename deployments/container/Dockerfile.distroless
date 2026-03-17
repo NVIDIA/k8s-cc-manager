@@ -4,6 +4,14 @@ ARG RUNTIME_VERSION="3.13-v4.0.2"
 # Stage 1: Build dependencies
 FROM python:3.13-slim AS builder
 
+# build args for proxy
+ARG PIP_INDEX_URL=https://edge.urm.nvidia.com/artifactory/edge-pypi-remotes
+ARG PIP_TRUSTED_HOST=edge.urm.nvidia.com
+
+# Environment variables derived from ARGs
+ENV PIP_INDEX_URL=$PIP_INDEX_URL
+ENV PIP_TRUSTED_HOST=$PIP_TRUSTED_HOST
+
 WORKDIR /build
 
 # Install build dependencies

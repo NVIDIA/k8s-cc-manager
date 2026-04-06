@@ -3,7 +3,6 @@
 set -x
 
 NODE_NAME=${NODE_NAME:?"Missing NODE_NAME env"}
-CC_CAPABLE_DEVICE_IDS=${CC_CAPABLE_DEVICE_IDS:?"Missing CC_CAPABLE_DEVICE_IDS env"}
 SANDBOX_VALIDATOR_DEPLOYED=""
 SANDBOX_PLUGIN_DEPLOYED=""
 VGPU_DEVICE_MANAGER_DEPLOYED=""
@@ -13,18 +12,6 @@ PAUSED_STR="paused-for-cc-mode-change"
 
 # declare an empty array for cc capable GPUs
 gpus=()
-# device-ids of cc capable GPUs
-device_ids=()
-
-_populate_cc_capable_device_ids() {
-    # split CC_CAPABLE_DEVICE_IDS and populate device_ids
-    device_ids=($(echo $CC_CAPABLE_DEVICE_IDS | tr "," "\n"))
-    if [ ${#device_ids[@]} -eq 0 ]; then
-        echo "no cc capable device ids were passed"
-        return 1
-    fi
-    return 0
-}
 
 _reset_gpu_after_cc_mode() {
     local gpu=$1
@@ -75,17 +62,6 @@ _get_all_cc_capable_gpus() {
     done
 }
 
-_get_device_id() {
-    local $gpu=$1
-    local dev_path=/sys/bus/pci/devices/$gpu/device 
-    if [ -e $dev_path ]; then
-        device_id=$(cat $dev_path)
-        return 0
-    fi
-    echo "device path $dev_path doesn't exist for $gpu"
-    return 1
-}
-
 _array_contains () {
     local array="$1[@]"
     local seeking=$2
@@ -97,15 +73,6 @@ _array_contains () {
         fi
     done
     return $in
-}
-
-_is_cc_capable_gpu() {
-    local $gpu=$1
-    device_id=$(_get_device_id $gpu)
-    if [ $? -ne 0 ]; then
-        return 1
-    fi
-    _array_contains device_ids "$device_id" && return 0 || return 1
 }
 
 _is_valid_mode() {
@@ -511,9 +478,6 @@ done
 if [ $# -ne 0 ]; then
     usage
 fi
-
-# populate all cc capable gpus that we are interested in
-_populate_cc_capable_device_ids || exit 1
 
 # get all cc capable gpus
 _get_all_cc_capable_gpus || exit 1

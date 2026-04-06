@@ -110,9 +110,6 @@ func validateFlagsOrEnv(c *cli.Context) error {
 	if os.Getenv("NODE_NAME") == "" {
 		return fmt.Errorf("NODE_NAME env must be set for k8s-cc-manager")
 	}
-	if os.Getenv("CC_CAPABLE_DEVICE_IDS") == "" {
-		return fmt.Errorf("CC_CAPABLE_DEVICE_IDS env must be set for k8s-cc-manager")
-	}
 	return nil
 }
 

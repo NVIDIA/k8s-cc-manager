@@ -1,66 +1,72 @@
-# Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Multi-stage build for NVIDIA k8s-cc-manager Python implementation (UBI 8 base)
+ARG CUDA_VERSION
+ARG BASE_DIST
+
+# Stage 1: Build dependencies (Python 3.9 matches typical UBI 8 python39 packages)
+FROM python:3.9-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG GPU_ADMIN_TOOLS_VERSION="v2025.10.20"
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/build/deps -r requirements.txt
+RUN pip install --upgrade --no-cache-dir --no-warn-conflicts --prefix=/build/deps urllib3==2.6.3
+
+RUN git clone --branch ${GPU_ADMIN_TOOLS_VERSION} https://github.com/NVIDIA/gpu-admin-tools.git
+
+# Stage 2: static rm for preStop hook
+FROM alpine:3.21 AS stg2
+RUN apk add --no-cache musl-dev gcc
+WORKDIR /build
+COPY rmsrc/rm.c rm.c
+RUN gcc -static -Os rm.c -o rm
+
+# Stage 3: CUDA + UBI 8 runtime
+FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
 
 ARG CUDA_VERSION
 ARG BASE_DIST
-ARG GOLANG_VERSION
 
-FROM golang:${GOLANG_VERSION} AS build
+RUN dnf install -y python39 python39-pip git \
+    && dnf clean all \
+    && rm -rf /var/cache/yum/*
 
-SHELL ["/bin/bash", "-c"]
+COPY --from=builder /build/deps /usr/local
 
-ARG TARGETARCH
-WORKDIR /build
-COPY . .
+COPY main.py /app/
+COPY gpu_operator_eviction.py /app/
+
+COPY --from=builder /build/gpu-admin-tools /app/gpu-admin-tools
+
+COPY --from=stg2 /build/rm /bin/rm
+
+WORKDIR /app
+
+ENV PYTHONPATH=/usr/local/lib/python3.9/site-packages
+
+ARG CVE_UPDATES
+RUN if [ -n "${CVE_UPDATES}" ]; then \
+        dnf update -y ${CVE_UPDATES} && \
+        dnf clean all && \
+        rm -rf /var/cache/yum/*; \
+    fi
+
+RUN rm -rf /usr/local/lib/python3.9/site-packages/urllib3-2.3.0.dist-info || true
 
 ARG VERSION="N/A"
 ARG GIT_COMMIT="unknown"
 
-RUN CGO_ENABLED=0 go build -o /artifacts/k8s-cc-manager ./cmd
-RUN cp ./scripts/cc-manager.sh /artifacts/cc-manager.sh
-
-RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o /artifacts/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";
-RUN chmod a+x /artifacts/kubectl
-
-FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
-
-# Install Python Interpreter
-RUN dnf install -y python38 git && pip3 install numpy
-
-LABEL io.k8s.display-name="NVIDIA Confidential Containers Manager for Kubernetes"
-LABEL name="NVIDIA Confidential Containers Manager for Kubernetes"
+LABEL io.k8s.display-name="NVIDIA CC Manager"
+LABEL name="NVIDIA CC Manager"
 LABEL vendor="NVIDIA"
 LABEL version="${VERSION}"
+LABEL com.nvidia.git-commit="${GIT_COMMIT}"
 LABEL release="N/A"
-LABEL summary="Manages the CC mode on NVIDIA GPUs with Kubernetes"
+LABEL summary="NVIDIA Confidential Compute Manager for Kubernetes"
 LABEL description="See summary"
 
-RUN mkdir /licenses && mv /NGC-DL-CONTAINER-LICENSE /licenses/NGC-DL-CONTAINER-LICENSE
-
-COPY --from=build /artifacts/k8s-cc-manager /usr/bin/k8s-cc-manager
-COPY --from=build /artifacts/kubectl /usr/bin/kubectl
-
-ARG GPU_ADMIN_TOOLS_VERSION
-# Setup CC tools and licenses
-COPY --from=build /artifacts/cc-manager.sh /usr/bin/cc-manager.sh
-RUN git clone -b ${GPU_ADMIN_TOOLS_VERSION} https://github.com/NVIDIA/gpu-admin-tools.git /usr/bin/gpu-admin-tools 
-
-# Install / upgrade packages here that are required to resolve CVEs
-ARG CVE_UPDATES
-RUN if [ -n "${CVE_UPDATES}" ]; then \
-        yum update -y ${CVE_UPDATES} && \
-        rm -rf /var/cache/yum/*; \
-    fi
-
-ENTRYPOINT ["k8s-cc-manager"]
+ENTRYPOINT ["python3.9", "/app/main.py"]

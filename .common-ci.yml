@@ -29,10 +29,9 @@ stages:
   - ngc-publish
 
 # Define the distribution targets
-.dist-ubi8:
+.dist-distroless:
   variables:
-    DIST: ubi8
-    CVE_UPDATES: "cyrus-sasl-lib"
+    DIST: distroless
 
 # Define the platform targets
 .platform-amd64:
@@ -138,9 +137,9 @@ stages:
         OUT_IMAGE_VERSION: "${DEVEL_RELEASE_IMAGE_VERSION}"
 
 # Define the release jobs
-release:staging-ubi8:
+release:staging-distroless:
   extends:
     - .release:staging
-    - .dist-ubi8
+    - .dist-distroless
   needs:
-    - image-ubi8
+    - image-distroless

@@ -72,7 +72,7 @@ build-%: DIST = $(*)
 build-%: DOCKERFILE_SUFFIX = $(*)
 build-%: DOCKERFILE = $(CURDIR)/deployments/container/Dockerfile.$(DOCKERFILE_SUFFIX)
 
-# Both ubi8 and build-ubi8 trigger a build of the relevant image
+# Each name in DISTRIBUTIONS maps to build-<name> (e.g. build-distroless).
 $(DISTRIBUTIONS): %: build-%
 $(BUILD_TARGETS): build-%:
 	DOCKER_BUILDKIT=1 \
@@ -82,7 +82,6 @@ $(BUILD_TARGETS): build-%:
 			--tag $(IMAGE) \
 			--build-arg BASE_DIST="$(DIST)" \
 			--build-arg CUDA_VERSION="$(CUDA_VERSION)" \
-			--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
 			--build-arg VERSION="$(VERSION)" \
 			--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
 			--build-arg GPU_ADMIN_TOOLS_VERSION="$(GPU_ADMIN_TOOLS_VERSION)" \

@@ -1,0 +1,891 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Generate and validate THIRD_PARTY_NOTICES.md for k8s-cc-manager.
+
+Two modes::
+
+    make -f deployments/container/Makefile notices         # regenerate (needs PyPI)
+    make -f deployments/container/Makefile notices-check    # validate (offline)
+
+Why ``pip download`` and not ``pip install``
+--------------------------------------------
+Everything an attribution record needs is in each wheel's
+``*.dist-info/METADATA``: distribution name and version, a license expression,
+the names of the bundled license files, and a source URL. Reading that requires
+*fetching* the distributions, not installing them, so nothing is executed, no
+virtualenv is built, and the run leaves nothing behind but a temporary directory.
+
+Why it must run on the builder stage's own interpreter
+------------------------------------------------------
+``--python-version`` is not enough. It selects which wheel *tags* are acceptable,
+but pip evaluates environment markers against the **running** interpreter, so a
+dependency guarded by ``python_version < "3.13"`` is resolved according to the
+interpreter executing pip, whatever ``--python-version`` says. Demonstrated with
+one pip build (26.1.2) and identical arguments::
+
+    # on python 3.12
+    pip install --dry-run --python-version 3.13 --only-binary=:all: \\
+        --target /tmp/t --report - aiosignal
+    -> aiosignal, frozenlist, typing_extensions
+
+    # on python 3.13
+    -> aiosignal, frozenlist
+
+``aiohttp`` and ``aiosignal`` both carry ``typing_extensions; python_version <
+"3.13"``, so resolving from a 3.12 host records a distribution the image does not
+install, and resolving from 3.14 or 3.13 does not. The same applies to
+``sys_platform`` markers on a macOS host. ``check_environment`` therefore refuses
+to run outside Linux on the builder stage's Python, which makes the marker
+environment the image's own. Machine architecture is the one axis left, and
+``check_arch_markers`` covers it.
+
+The practical effect is one command for anyone not already on that combination::
+
+    docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp \\
+        -v "$PWD:/w" -w /w python:3.13-slim python3 hack/generate-notices
+
+Why not pip-licenses or syft
+----------------------------
+``pip-licenses`` reports Trove classifier strings ("Apache Software License")
+where METADATA holds the real value, so it needs heuristic cleanup that reading
+METADATA does not. ``syft`` yields clean SPDX expressions but carries neither a
+source URL nor license text for Python packages. METADATA also names its license
+files explicitly via ``License-File``, which avoids filename guesswork (idna
+ships ``LICENSE.md``, urllib3 ships ``LICENSE.txt``).
+
+Why the image's post-install pins are applied
+---------------------------------------------
+``Dockerfile.distroless`` installs ``requirements.txt`` and then force-installs
+specific versions on top (today ``urllib3==2.6.3``, to carry a CVE fix ahead of
+what the kubernetes client resolves). Reading ``requirements.txt`` alone would
+therefore record a urllib3 version that is *not* the one in the image. The pins
+are parsed out of the Dockerfile rather than duplicated here so the two cannot
+drift.
+
+Why one platform is resolved, and what guards it
+------------------------------------------------
+The image is released for linux/amd64 and linux/arm64, but the closure is
+resolved on amd64 only. A wheel's architecture does not change its license, so
+the second architecture adds attribution only if it installs a *different set*
+of distributions -- which can only happen through an environment marker.
+``check_arch_markers`` fails the run if any dependency carries a marker that
+discriminates on machine architecture, so that assumption is enforced rather
+than trusted.
+
+Why CI does not regenerate
+--------------------------
+``requirements.txt`` pins nothing but ``kubernetes>=28.1.0`` and there is no
+lock file, so the resolved closure changes whenever PyPI publishes. A CI job
+that regenerated and diffed would need network access on every build and would
+go red on days this repository did not change. Instead the generated file is
+committed, regeneration is a deliberate out-of-band step, and CI runs
+``--check``: an offline comparison of the inputs recorded in the document
+against the inputs in the tree. That catches a dependency edit landing without
+a notices refresh, which is the failure that matters, without depending on PyPI.
+"""
+
+from __future__ import annotations
+
+import argparse
+import email.parser
+import hashlib
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+REQUIREMENTS = REPO_ROOT / "requirements.txt"
+DOCKERFILE = REPO_ROOT / "deployments" / "container" / "Dockerfile.distroless"
+MULTI_ARCH_MK = REPO_ROOT / "deployments" / "container" / "multi-arch.mk"
+OUTPUT = REPO_ROOT / "THIRD_PARTY_NOTICES.md"
+
+IMAGE = "nvcr.io/nvidia/k8s-cc-manager"
+
+# Resolution happens here; see the module docstring for why one platform is
+# enough and what enforces it. Several manylinux baselines are listed because
+# projects publish against different ones and a single tag silently fails to
+# match wheels built for a newer baseline.
+RESOLUTION_PLATFORM = "linux/amd64"
+RESOLUTION_TAGS = [
+    "manylinux2014_x86_64",
+    "manylinux_2_17_x86_64",
+    "manylinux_2_28_x86_64",
+]
+
+# License-shaped filenames inside dist-info, used when a wheel ships license
+# text without declaring it through License-File. Both spellings of "licence"
+# are matched; the METADATA/RECORD/WHEEL bookkeeping files are excluded.
+LICENSE_FILE_RE = re.compile(
+    r"^(LICEN[CS]E|COPYING|COPYRIGHT|NOTICE|AUTHORS|PATENTS)([-._].*)?$",
+    re.IGNORECASE,
+)
+
+# A marker pinning one specific machine architecture, e.g.
+# `platform_machine == "aarch64"`. A marker that lists architectures
+# inclusively resolves true on both targets and cannot split the closure; it is
+# equality against a single value that would.
+ARCH_MARKER_RE = re.compile(
+    r"platform_machine\s*==\s*['\"](?P<arch>[^'\"]+)['\"]", re.IGNORECASE
+)
+ARCH_TARGETS = {"x86_64", "amd64", "aarch64", "arm64"}
+
+# Exact-match normalization of the free-text `License:` field onto SPDX
+# identifiers. Matching is exact after whitespace stripping -- never fuzzy, never
+# substring -- so it cannot silently reclassify a license it does not know, and
+# anything unmapped is reproduced verbatim. This exists because the legacy field
+# is prose: kubernetes says "Apache License Version 2.0", multidict says
+# "Apache License 2.0" and aiosignal says "Apache 2.0" for the same license,
+# which makes the index table unreviewable.
+SPDX_ALIASES = {
+    "Apache 2.0": "Apache-2.0",
+    "Apache License 2.0": "Apache-2.0",
+    "Apache License Version 2.0": "Apache-2.0",
+    "Apache License, Version 2.0": "Apache-2.0",
+    "Apache Software License": "Apache-2.0",
+    "BSD License": "BSD-3-Clause",
+    "MIT License": "MIT",
+}
+
+# Per-distribution rulings for values that are not a license identifier at all
+# and cannot be mapped generically. Each entry records the exact declared string
+# it applies to; if upstream changes that string the run fails rather than
+# carrying a stale ruling forward.
+#
+#   python-dateutil declares "Dual License". Its LICENSE file contains the
+#   Apache-2.0 grant (for contributions after 2017-12-01) followed by the
+#   BSD-3-Clause grant (for the earlier code), and its Trove classifiers list
+#   both. Both texts are reproduced verbatim below the entry.
+PACKAGE_LICENSE_RULINGS = {
+    "python-dateutil": ("Dual License", "Apache-2.0 AND BSD-3-Clause"),
+}
+
+# Anything whose declared value is longer than this, or reads like prose rather
+# than an identifier, is a license *text* in the License field rather than a
+# name. Those are replaced with a pointer; the verbatim text is rendered below
+# the entry either way.
+PROSE_RE = re.compile(r"permission|copyright", re.IGNORECASE)
+MAX_LICENSE_LEN = 60
+SEE_TEXT = "See license text below"
+
+INPUTS_HEADING = "## Generation Inputs"
+
+# The scope statement. It is deliberately explicit about what is *not* covered:
+# an attribution document that implies it covers everything in the image is
+# worse than one that names its own boundaries.
+HEADER_TEMPLATE = """# Third-Party Notices
+
+NVIDIA CC Manager for Kubernetes
+
+This file lists the third-party **Python distributions** installed into the
+released `{image}` container image, together with the
+verbatim text of each distribution's license.
+
+The set is the transitive dependency closure that `pip install -r
+{requirements}` resolves for the image's Python {python_version} builder stage,
+plus the versions that
+`{dockerfile}` force-installs on top of that
+closure. Those pins are part of the set because they are what the image actually
+contains, which is not the same as what `{requirements}` alone describes.
+
+This file does **not** cover:
+
+* The base image, `nvcr.io/nvidia/distroless/python`, including the Python
+  interpreter and its standard library. Base image contents are covered by that
+  image's own compliance process.
+* NVIDIA's own code: `main.py`, `gpu_operator_eviction.py`, `rmsrc/rm.c`, and the
+  copy of [NVIDIA/gpu-admin-tools](https://github.com/NVIDIA/gpu-admin-tools)
+  that the build clones into `/app/gpu-admin-tools`. These are NVIDIA-owned and
+  are not third-party dependencies.
+* The C toolchain behind `/bin/rm`. Its source, `rmsrc/rm.c`, is NVIDIA's own and
+  pulls in no third-party library source, but it is compiled with `gcc -static`
+  in an `alpine:3.21` stage, so the shipped binary embeds musl libc. That is a C
+  surface rather than a Python dependency; it is named here so its absence from
+  the list below is not mistaken for an omission.
+* Anything in `deployments/container/Dockerfile.ubi8`. That file is not built or
+  published: `DISTRIBUTIONS := distroless` in `deployments/container/Makefile`
+  is the full release set.
+
+Versions are those resolved when this file was generated. `{requirements}`
+constrains only `kubernetes>=28.1.0` and this repository carries no lock file, so
+an image built later may contain newer versions of these same distributions. The
+set of distributions and the licenses they are under is what this file attests.
+
+The closure is resolved on `{resolution_platform}`, which covers every released
+platform: a wheel's architecture does not change its license, and the generator
+fails closed if any dependency is gated to a single machine architecture.
+
+This file is generated. Run `make -f deployments/container/Makefile notices` to
+regenerate it, which requires network access; `make -f
+deployments/container/Makefile notices-check` verifies offline that it still
+describes this tree.
+"""
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"ERROR: {message}")
+
+
+def normalize(name: str) -> str:
+    """Normalize a distribution name per PEP 503."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def fence_for(text: str) -> str:
+    """Return a code fence long enough to hold ``text`` verbatim.
+
+    Some license files contain Markdown themselves. A fixed three-backtick fence
+    would be closed early by such content, so the rest of that license would
+    render as Markdown and every following block would be inverted. CommonMark
+    allows a longer opening fence, so use one backtick more than the longest run
+    appearing in the text.
+    """
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+# --------------------------------------------------------------------------
+# Inputs read out of the repository
+# --------------------------------------------------------------------------
+
+
+def read_dockerfile_inputs() -> tuple[str, list[str]]:
+    """Return (python version, post-resolution pins) from the distroless build.
+
+    The Python version drives the resolution: environment markers gate on
+    ``python_version`` and wheel availability varies by ``cpXX`` tag. The pins
+    are the ``name==version`` arguments of the ``pip install`` steps that run
+    after ``requirements.txt``, which is what actually lands in the image.
+    """
+    if not DOCKERFILE.is_file():
+        fail(f"Dockerfile not found: {DOCKERFILE}")
+
+    # Join backslash continuations so a wrapped RUN is one logical line.
+    text = re.sub(r"\\\n", " ", DOCKERFILE.read_text(encoding="utf-8"))
+
+    builder = re.search(
+        r"^FROM\s+python:(\d+\.\d+)\S*\s+AS\s+builder\s*$", text, re.MULTILINE
+    )
+    if builder is None:
+        fail(
+            f"no 'FROM python:<x.y>... AS builder' stage in {rel(DOCKERFILE)}. "
+            "The generator resolves the closure for that interpreter and cannot "
+            "guess it."
+        )
+    python_version = builder.group(1)
+
+    # The runtime stage puts the copied site-packages on PYTHONPATH under a
+    # hard-coded version. If it disagrees with the builder, the image ships
+    # packages the interpreter will not import, and this document would describe
+    # a closure that is not the installed one.
+    runtime = re.search(r"PYTHONPATH=\S*?/python(\d+\.\d+)/site-packages", text)
+    if runtime is None:
+        fail(f"no PYTHONPATH site-packages line in {rel(DOCKERFILE)}")
+    if runtime.group(1) != python_version:
+        fail(
+            f"{rel(DOCKERFILE)} builds with python {python_version} but sets "
+            f"PYTHONPATH for python {runtime.group(1)}"
+        )
+
+    pins: list[str] = []
+    for line in text.splitlines():
+        if not re.match(r"^\s*RUN\s+.*\bpip\s+install\b", line):
+            continue
+        for token in line.split():
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*==[^\s]+", token):
+                pins.append(token)
+
+    return python_version, sorted(set(pins))
+
+
+def read_released_platforms() -> list[str]:
+    """Read the released platform list from the repository's build config."""
+    if not MULTI_ARCH_MK.is_file():
+        fail(f"platform matrix not found: {MULTI_ARCH_MK}")
+    match = re.search(
+        r"^DOCKER_BUILD_PLATFORM_OPTIONS\s*=\s*--platform=(\S+)\s*$",
+        MULTI_ARCH_MK.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if match is None:
+        fail(f"no DOCKER_BUILD_PLATFORM_OPTIONS in {rel(MULTI_ARCH_MK)}")
+    return [p.strip() for p in match.group(1).split(",") if p.strip()]
+
+
+def rel(path: pathlib.Path) -> str:
+    """Path relative to the repository root, for messages and the document."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+# --------------------------------------------------------------------------
+# Collection
+# --------------------------------------------------------------------------
+
+
+def check_environment(python_version: str) -> None:
+    """Refuse to resolve from an environment the image does not build in.
+
+    See the module docstring: pip evaluates environment markers against the
+    running interpreter, so a resolution from any other Linux/Python
+    combination can silently add or drop distributions.
+    """
+    running = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if sys.platform == "linux" and running == python_version:
+        return
+    fail(
+        f"this must run on Linux under Python {python_version}, the environment "
+        f"{rel(DOCKERFILE)} installs the image's\n"
+        f"Python dependencies in. This is {sys.platform} under Python {running}.\n"
+        "pip evaluates environment markers against the running interpreter, not "
+        "against\n--python-version, so resolving here would produce a closure "
+        "the image does not\nhave. Re-run in the builder stage's environment:\n\n"
+        '  docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp \\\n'
+        f'      -v "$PWD:/w" -w /w python:{python_version}-slim \\\n'
+        "      python3 hack/generate-notices"
+    )
+
+
+def pip_download(args: list[str], dest: pathlib.Path, python_version: str) -> None:
+    cmd = [
+        sys.executable, "-m", "pip", "download",
+        "--only-binary=:all:",
+        "--python-version", python_version,
+        "--dest", str(dest),
+    ]
+    for tag in RESOLUTION_TAGS:
+        cmd += ["--platform", tag]
+    cmd += args
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        fail(
+            f"pip download failed for {RESOLUTION_PLATFORM}.\n"
+            "If a distribution publishes no wheel for this target, this tool "
+            "needs an sdist fallback to read its PKG-INFO."
+        )
+
+
+def read_wheel(wheel: pathlib.Path) -> dict:
+    """Extract one wheel's attribution record from its dist-info."""
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+        meta_name = next(
+            (n for n in names if n.endswith(".dist-info/METADATA")), None
+        )
+        if meta_name is None:
+            fail(f"no dist-info/METADATA in {wheel.name}")
+        raw = archive.read(meta_name).decode("utf-8", errors="replace")
+        msg = email.parser.Parser().parsestr(raw)
+        dist_info = meta_name.rsplit("/", 1)[0]
+
+        # Prefer the PEP 639 SPDX expression; fall back to the legacy field.
+        declared = (msg.get("License-Expression") or msg.get("License") or "").strip()
+
+        # Source URL: Home-page, else the most repository-ish Project-URL.
+        url = (msg.get("Home-page") or "").strip()
+        if not url:
+            entries = {}
+            for item in msg.get_all("Project-URL") or []:
+                label, _, target = item.partition(",")
+                entries[label.strip().lower()] = target.strip()
+            for key in ("source", "source code", "repository", "homepage",
+                        "documentation"):
+                if key in entries:
+                    url = entries[key]
+                    break
+
+        # License-File names the files exactly, so no guessing.
+        texts: dict[str, str] = {}
+        captured: set[str] = set()
+        for filename in msg.get_all("License-File") or []:
+            filename = filename.strip()
+            for candidate in (
+                f"{dist_info}/licenses/{filename}",
+                f"{dist_info}/license_files/{filename}",
+                f"{dist_info}/{filename}",
+            ):
+                if candidate in names:
+                    texts[filename] = archive.read(candidate).decode(
+                        "utf-8", errors="replace"
+                    )
+                    captured.add(candidate)
+                    break
+
+        # Fall back to scanning dist-info for license-shaped files. License-File
+        # is a recent metadata field and plenty of wheels still ship a LICENSE
+        # without declaring it.
+        for name in sorted(names):
+            if name in captured or not name.startswith(f"{dist_info}/"):
+                continue
+            if name.endswith("/"):
+                continue
+            if not LICENSE_FILE_RE.match(name.rsplit("/", 1)[-1]):
+                continue
+            # Key by the path relative to dist-info so a nested file stays
+            # distinguishable from a same-named file at the root.
+            label = name[len(dist_info) + 1:]
+            texts.setdefault(
+                label, archive.read(name).decode("utf-8", errors="replace")
+            )
+
+        version = (msg.get("Version") or "").strip()
+        if not version:
+            fail(f"{wheel.name} declares no Version")
+
+        return {
+            "key": normalize(msg.get("Name") or wheel.name.split("-")[0]),
+            "version": version,
+            "declared": declared,
+            "url": url or "n/a",
+            "texts": texts,
+            "requires": [r.strip() for r in (msg.get_all("Requires-Dist") or [])],
+        }
+
+
+def resolve_license(record: dict) -> str:
+    """Reduce the declared license value to an identifier, or to a pointer."""
+    key, declared = record["key"], record["declared"]
+
+    ruling = PACKAGE_LICENSE_RULINGS.get(key)
+    if ruling is not None:
+        expected, spdx = ruling
+        if declared == expected:
+            return spdx
+        fail(
+            f"{key} declares license {declared!r}, but this tool carries a "
+            f"ruling written for {expected!r}. Re-read the package's license "
+            "files and update PACKAGE_LICENSE_RULINGS."
+        )
+
+    if declared in SPDX_ALIASES:
+        return SPDX_ALIASES[declared]
+
+    first = declared.split("\n")[0].strip()
+    if not first or first.upper() == "UNKNOWN":
+        return SEE_TEXT
+    if len(first) > MAX_LICENSE_LEN or PROSE_RE.search(first):
+        return SEE_TEXT
+    return first
+
+
+def check_arch_markers(packages: list[dict], released: list[str]) -> None:
+    """Fail if the closure could differ between the released architectures."""
+    offenders: list[str] = []
+    for pkg in packages:
+        for requirement in pkg["requires"]:
+            found = {
+                m.group("arch").lower()
+                for m in ARCH_MARKER_RE.finditer(requirement)
+            }
+            if not found & ARCH_TARGETS:
+                continue
+            # A marker naming both released architectures resolves true on each,
+            # so it cannot split the closure.
+            if {"x86_64", "amd64"} & found and {"aarch64", "arm64"} & found:
+                continue
+            offenders.append(f"{pkg['key']}: {requirement}")
+
+    if offenders:
+        for line in offenders:
+            print(f"  {line}", file=sys.stderr)
+        fail(
+            "a dependency is gated to a single machine architecture, so a "
+            f"{RESOLUTION_PLATFORM}-only resolution may be missing packages "
+            f"installed on {', '.join(released)}. Resolve every released "
+            "platform and union the results, or confirm the marker cannot "
+            "split the closure and update this guard."
+        )
+
+
+def collect(
+    python_version: str, pins: list[str], work: pathlib.Path
+) -> list[dict]:
+    """Fetch the closure, apply the image's pins, and read every wheel."""
+    base = work / "base"
+    base.mkdir(parents=True)
+    print(
+        f"Resolving {rel(REQUIREMENTS)} for {RESOLUTION_PLATFORM}, "
+        f"python {python_version}...",
+        file=sys.stderr,
+    )
+    pip_download(["--requirement", str(REQUIREMENTS)], base, python_version)
+    base_wheels = sorted(base.glob("*.whl"))
+
+    pinned = work / "pinned"
+    pinned.mkdir(parents=True)
+    if pins:
+        print(f"Applying image pins: {', '.join(pins)}", file=sys.stderr)
+        # --no-deps: a pin is a version bump applied on top of an already
+        # resolved closure, exactly as the Dockerfile applies it. The guard
+        # below fails if such a bump would pull in a distribution the base
+        # resolution did not already contain.
+        pip_download(["--no-deps", *pins], pinned, python_version)
+    pinned_wheels = sorted(pinned.glob("*.whl"))
+
+    if not base_wheels:
+        fail(f"no wheels resolved for {RESOLUTION_PLATFORM}")
+
+    merged: dict[str, dict] = {}
+    for wheel in base_wheels:
+        record = read_wheel(wheel)
+        merged.setdefault(record["key"], record)
+
+    for wheel in pinned_wheels:
+        record = read_wheel(wheel)
+        previous = merged.get(record["key"])
+        if previous is None:
+            fail(
+                f"pin {record['key']}=={record['version']} names a distribution "
+                f"that is not in the {rel(REQUIREMENTS)} closure"
+            )
+        for requirement in record["requires"]:
+            name, _, marker = requirement.partition(";")
+            if "extra" in marker and "==" in marker:
+                continue  # an extra, which the image does not install
+            dep = normalize(
+                re.split(r"[\s<>=!~;\[(]", name.strip(), maxsplit=1)[0]
+            )
+            if dep and dep not in merged:
+                fail(
+                    f"pinned {record['key']}=={record['version']} requires "
+                    f"{dep!r}, which the base resolution does not contain. The "
+                    "pin is fetched with --no-deps, so that dependency would be "
+                    "missing from this document; resolve the pin with its "
+                    "dependencies instead."
+                )
+        if previous["version"] != record["version"]:
+            print(
+                f"  {record['key']}: {previous['version']} -> "
+                f"{record['version']} (pinned by {rel(DOCKERFILE)})",
+                file=sys.stderr,
+            )
+        merged[record["key"]] = record
+
+    packages = [merged[key] for key in sorted(merged)]
+    for pkg in packages:
+        pkg["license"] = resolve_license(pkg)
+    return packages
+
+
+# --------------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------------
+
+
+def render(packages: list[dict], inputs: dict[str, str]) -> str:
+    out: list[str] = []
+    add = out.append
+
+    add(HEADER_TEMPLATE.format(
+        image=IMAGE,
+        requirements=rel(REQUIREMENTS),
+        dockerfile=rel(DOCKERFILE),
+        python_version=inputs["python-version"],
+        resolution_platform=RESOLUTION_PLATFORM,
+    ))
+    add(INPUTS_HEADING)
+    add("")
+    add("```text")
+    for key in sorted(inputs):
+        add(f"{key}: {inputs[key]}")
+    add("```")
+    add("")
+
+    counts: dict[str, int] = {}
+    for pkg in packages:
+        counts[pkg["license"]] = counts.get(pkg["license"], 0) + 1
+    add("## License Summary")
+    add("")
+    add("| License | Distributions |")
+    add("|---------|---------------|")
+    for name in sorted(counts):
+        members = ", ".join(
+            f"`{p['key']}`" for p in packages if p["license"] == name
+        )
+        add(f"| {name} | {members} |")
+    add("")
+
+    add("## Python Dependency Index")
+    add("")
+    add("| Distribution | Version | License | Source |")
+    add("|--------------|---------|---------|--------|")
+    for pkg in packages:
+        add(
+            f"| `{pkg['key']}` | {pkg['version']} | {pkg['license']} "
+            f"| {pkg['url']} |"
+        )
+    add("")
+
+    add("## Python Dependency License Texts")
+    for pkg in packages:
+        add("")
+        add(f"### {pkg['key']}")
+        add("")
+        add(f"* Version: {pkg['version']}")
+        add(f"* License: {pkg['license']}")
+        if pkg["declared"] and pkg["declared"] != pkg["license"]:
+            add(f"* Declared in package metadata: `{pkg['declared']}`")
+        add(f"* Source: {pkg['url']}")
+        for filename in sorted(pkg["texts"]):
+            body = pkg["texts"][filename].rstrip("\n")
+            fence = fence_for(body)
+            add("")
+            add(f"#### {filename}")
+            add("")
+            add(f"{fence}text")
+            add(body)
+            add(fence)
+
+    return "\n".join(out) + "\n"
+
+
+# --------------------------------------------------------------------------
+# Offline check
+# --------------------------------------------------------------------------
+
+
+def split_prose(document: str) -> tuple[list[str], list[str]]:
+    """Return (index rows, section names) found outside fenced license text.
+
+    License texts are reproduced verbatim inside fences and some of them are
+    Markdown in their own right, so a plain line scan would pick up a `###`
+    heading or a table row belonging to a license rather than to this document.
+    Fence state is tracked the way CommonMark closes a fence: a run of backticks
+    at least as long as the one that opened it.
+    """
+    rows: list[str] = []
+    sections: list[str] = []
+    fence = 0
+    for line in document.splitlines():
+        if fence:
+            match = re.fullmatch(r"(`{3,})\s*", line)
+            if match and len(match.group(1)) >= fence:
+                fence = 0
+            continue
+        match = re.fullmatch(r"(`{3,})text", line)
+        if match:
+            fence = len(match.group(1))
+            continue
+        if line.startswith("### "):
+            sections.append(line[4:].strip())
+        elif line.startswith("| `"):
+            rows.append(line)
+    return rows, sections
+
+
+def parse_inputs_block(document: str) -> dict[str, str]:
+    match = re.search(
+        rf"^{re.escape(INPUTS_HEADING)}\n\n```text\n(.*?)\n```$",
+        document,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        fail(
+            f"{rel(OUTPUT)} has no '{INPUTS_HEADING}' block. Regenerate it with "
+            "'make -f deployments/container/Makefile notices'."
+        )
+    recorded: dict[str, str] = {}
+    for line in match.group(1).splitlines():
+        key, _, value = line.partition(":")
+        recorded[key.strip()] = value.strip()
+    return recorded
+
+
+def check(expected: dict[str, str]) -> int:
+    """Validate the committed document against the tree, without network."""
+    if not OUTPUT.is_file():
+        fail(
+            f"{rel(OUTPUT)} does not exist. Run 'make -f "
+            "deployments/container/Makefile notices' and commit the result."
+        )
+
+    document = OUTPUT.read_text(encoding="utf-8")
+    recorded = parse_inputs_block(document)
+
+    problems: list[str] = []
+    for key in sorted(expected):
+        if recorded.get(key) != expected[key]:
+            problems.append(
+                f"  {key}: recorded {recorded.get(key)!r}, tree has "
+                f"{expected[key]!r}"
+            )
+
+    # Structural self-consistency: every index row must have a license-text
+    # section, every section must carry a version and a license, and no license
+    # may be unresolved. This is what stops a truncated or hand-edited document
+    # from passing.
+    rows, sections = split_prose(document)
+    index = []
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        if len(cells) != 4:
+            problems.append(f"  malformed index row: {row}")
+            continue
+        index.append(cells)
+
+    if not index:
+        problems.append("  index table is empty")
+
+    names = {cells[0].strip("`") for cells in index}
+    missing = sorted(names - set(sections))
+    extra = sorted(set(sections) - names)
+    if missing:
+        problems.append(f"  index rows with no license text: {missing}")
+    if extra:
+        problems.append(f"  license text sections not in the index: {extra}")
+
+    for name, version, license_name, source in index:
+        if license_name in ("", "Unknown", SEE_TEXT):
+            problems.append(f"  {name}: unresolved license {license_name!r}")
+        if not re.match(r"^[0-9]", version):
+            problems.append(f"  {name}: implausible version {version!r}")
+        if not source:
+            problems.append(f"  {name}: index row has no source column")
+
+    for name in sections:
+        body = document.split(f"\n### {name}\n", 1)[1].split("\n### ", 1)[0]
+        if "```text" not in body:
+            problems.append(f"  {name}: section contains no license text")
+
+    if str(len(index)) != recorded.get("distribution-count"):
+        problems.append(
+            f"  distribution-count: recorded "
+            f"{recorded.get('distribution-count')!r}, index has {len(index)} rows"
+        )
+
+    if problems:
+        print(f"{rel(OUTPUT)} is out of date or inconsistent:", file=sys.stderr)
+        for line in problems:
+            print(line, file=sys.stderr)
+        fail(
+            "run 'make -f deployments/container/Makefile notices' and commit the "
+            "result."
+        )
+
+    print(
+        f"{rel(OUTPUT)} is current: {len(index)} distributions, inputs match the "
+        "tree."
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------
+
+
+def build_inputs(python_version: str, pins: list[str], released: list[str]) -> dict:
+    if not REQUIREMENTS.is_file():
+        fail(f"requirements file not found: {REQUIREMENTS}")
+    return {
+        "requirements": rel(REQUIREMENTS),
+        # A digest covers every kind of edit, unlike matching a version string,
+        # and needs no network to verify.
+        "requirements-sha256": hashlib.sha256(
+            REQUIREMENTS.read_bytes()
+        ).hexdigest(),
+        "python-version": python_version,
+        "released-platforms": ", ".join(released),
+        "resolution-platform": RESOLUTION_PLATFORM,
+        "image-pins": ", ".join(pins) if pins else "none",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Generate or validate THIRD_PARTY_NOTICES.md."
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate the committed file against the tree, offline.",
+    )
+    args = parser.parse_args()
+
+    python_version, pins = read_dockerfile_inputs()
+    released = read_released_platforms()
+    inputs = build_inputs(python_version, pins, released)
+
+    if args.check:
+        return check(inputs)
+
+    check_environment(python_version)
+
+    work = pathlib.Path(tempfile.mkdtemp(prefix="ccm-notices."))
+    try:
+        packages = collect(python_version, pins, work)
+        check_arch_markers(packages, released)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    # A distribution that ships no license text cannot be attributed from its
+    # own artifact, and this document would then carry an entry that says
+    # nothing. Fail rather than emit it.
+    missing = [p["key"] for p in packages if not p["texts"]]
+    if missing:
+        for key in missing:
+            print(f"  {key}", file=sys.stderr)
+        fail(
+            "the distributions above ship no license file, so no verbatim text "
+            "can be reproduced. Obtain the text from the upstream project and "
+            "extend this tool before regenerating."
+        )
+
+    unresolved = [p["key"] for p in packages if p["license"] == SEE_TEXT]
+    if unresolved:
+        for key in unresolved:
+            print(f"  {key}", file=sys.stderr)
+        fail(
+            "the distributions above declare no usable license identifier. Read "
+            "their license files and add a ruling to PACKAGE_LICENSE_RULINGS."
+        )
+
+    inputs["distribution-count"] = str(len(packages))
+    with open(OUTPUT, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(render(packages, inputs))
+
+    print(
+        f"Wrote {rel(OUTPUT)} ({len(packages)} distributions)", file=sys.stderr
+    )
+
+    # Surfaced, not enforced: which licenses need a compliance decision is not
+    # this tool's call, but a reviewer should not have to read 21 sections to
+    # find the ones that are not the usual permissive four.
+    common = {"Apache-2.0", "MIT", "BSD-3-Clause", "ISC"}
+    notable = [p for p in packages if p["license"] not in common]
+    if notable:
+        print(
+            "\nNOTE: these distributions are under something other than "
+            "Apache-2.0, MIT,\nBSD-3-Clause or ISC. Confirm they have been "
+            "reviewed:",
+            file=sys.stderr,
+        )
+        for pkg in notable:
+            print(f"  {pkg['key']} {pkg['version']}: {pkg['license']}",
+                  file=sys.stderr)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

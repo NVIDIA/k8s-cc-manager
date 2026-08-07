@@ -89,6 +89,23 @@ $(BUILD_TARGETS): build-%:
 			--file $(DOCKERFILE) \
 			$(CURDIR)
 
+##### Third-party notices #####
+# Regenerating resolves the Python dependency closure from PyPI, so it needs
+# network access and is a deliberate, out-of-band step: requirements.txt carries
+# only a lower bound and no lock file, so the closure moves whenever PyPI
+# publishes, and a regenerate-and-diff gate would go red on days this repository
+# did not change. notices-check is the CI gate instead: it is offline, and
+# compares the inputs recorded in the committed document against the tree.
+PYTHON ?= python3
+
+.PHONY: notices
+notices:
+	@$(PYTHON) $(CURDIR)/hack/generate-notices
+
+.PHONY: notices-check
+notices-check:
+	@$(PYTHON) $(CURDIR)/hack/generate-notices --check
+
 .PHONY: bump-commit
 BUMP_COMMIT := Bump to version $(VERSION)
 bump-commit:

@@ -57,6 +57,7 @@ RUN ["/bin/rm", "-rf", "/usr/local/lib/python3.13/site-packages/urllib3-2.3.0.di
 
 ARG VERSION="N/A"
 ARG GIT_COMMIT="unknown"
+ARG BUILD_TIMESTAMP
 
 LABEL io.k8s.display-name="NVIDIA CC Manager"
 LABEL name="NVIDIA CC Manager"
@@ -66,5 +67,14 @@ LABEL com.nvidia.git-commit=${GIT_COMMIT}
 LABEL release="N/A"
 LABEL summary="NVIDIA Confidential Compute Manager for Kubernetes"
 LABEL description="See summary"
+LABEL org.opencontainers.image.base.name="nvcr.io/nvidia/distroless/python"
+LABEL org.opencontainers.image.created="${BUILD_TIMESTAMP}"
+LABEL org.opencontainers.image.documentation="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.source="https://github.com/NVIDIA/k8s-cc-manager.git"
+LABEL org.opencontainers.image.title="NVIDIA CC Manager"
+LABEL org.opencontainers.image.url="https://catalog.ngc.nvidia.com/orgs/nvidia/cloud-native/containers/k8s-cc-manager"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+LABEL org.opencontainers.image.version="${VERSION}"
 
 ENTRYPOINT ["python3", "/app/main.py"]

@@ -83,6 +83,8 @@ $(BUILD_TARGETS): build-%:
 			--build-arg BASE_DIST="$(DIST)" \
 			--build-arg CUDA_VERSION="$(CUDA_VERSION)" \
 			--build-arg VERSION="$(VERSION)" \
+			--build-arg GIT_COMMIT="$(GIT_COMMIT)" \
+			--build-arg BUILD_TIMESTAMP="$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")" \
 			--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
 			--build-arg GPU_ADMIN_TOOLS_VERSION="$(GPU_ADMIN_TOOLS_VERSION)" \
 			--build-arg RUNTIME_VERSION="$(RUNTIME_VERSION)" \

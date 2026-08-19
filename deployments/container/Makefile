@@ -91,6 +91,8 @@ $(BUILD_TARGETS): build-%:
 			--file $(DOCKERFILE) \
 			$(CURDIR)
 
+PYTHON ?= python3
+
 .PHONY: bump-commit
 BUMP_COMMIT := Bump to version $(VERSION)
 bump-commit:

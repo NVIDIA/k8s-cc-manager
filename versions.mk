@@ -19,4 +19,5 @@ CUDA_VERSION := 12.4.0
 GPU_ADMIN_TOOLS_VERSION := v2026.06.05
 RUNTIME_VERSION := 3.13-v4.0.9
 
+
 GIT_COMMIT ?= $(shell git describe --match="" --dirty --long --always --abbrev=40 2> /dev/null || echo "")

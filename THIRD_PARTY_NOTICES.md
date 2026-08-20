@@ -54,7 +54,7 @@ third-party dependency and is not listed here.
 | `requests` | 2.34.2 | Apache-2.0 | https://github.com/psf/requests |
 | `requests-oauthlib` | 2.0.0 | ISC | https://github.com/requests/requests-oauthlib |
 | `six` | 1.17.0 | MIT | https://github.com/benjaminp/six |
-| `urllib3` | 2.6.3 | MIT | https://urllib3.readthedocs.io |
+| `urllib3` | 2.7.0 | MIT | https://urllib3.readthedocs.io |
 | `websocket-client` | 1.9.0 | Apache-2.0 | https://github.com/websocket-client/websocket-client.git |
 | `yarl` | 1.24.5 | Apache-2.0 | https://github.com/aio-libs/yarl |
 
@@ -2024,7 +2024,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### urllib3
 
-* Version: 2.6.3
+* Version: 2.7.0
 * License: MIT
 * Source: https://urllib3.readthedocs.io
 

@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG GPU_ADMIN_TOOLS_VERSION="v2025.10.20"
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/build/deps -r requirements.txt
-RUN pip install --upgrade --no-cache-dir --no-warn-conflicts --prefix=/build/deps urllib3==2.6.3
+RUN pip install --upgrade --no-cache-dir --no-warn-conflicts --prefix=/build/deps urllib3==2.7.0
 
 RUN git clone --branch ${GPU_ADMIN_TOOLS_VERSION} https://github.com/NVIDIA/gpu-admin-tools.git
 
@@ -55,7 +55,7 @@ RUN if [ -n "${CVE_UPDATES}" ]; then \
         rm -rf /var/cache/yum/*; \
     fi
 
-RUN rm -rf /usr/local/lib/python3.9/site-packages/urllib3-2.3.0.dist-info || true
+RUN rm -rf /usr/local/lib/python3.9/site-packages/urllib3-2.7.0.dist-info || true
 
 ARG VERSION="N/A"
 ARG GIT_COMMIT="unknown"

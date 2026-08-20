@@ -76,7 +76,7 @@ build-%: DOCKERFILE = $(CURDIR)/deployments/container/Dockerfile.$(DOCKERFILE_SU
 $(DISTRIBUTIONS): %: build-%
 $(BUILD_TARGETS): build-%:
 	DOCKER_BUILDKIT=1 \
-		$(DOCKER) $(BUILDX) build --pull \
+		$(DOCKER) $(BUILDX) build --pull --no-cache \
 			$(DOCKER_BUILD_OPTIONS) \
 			$(DOCKER_BUILD_PLATFORM_OPTIONS) \
 			--tag $(IMAGE) \
@@ -90,6 +90,49 @@ $(BUILD_TARGETS): build-%:
 			--build-arg RUNTIME_VERSION="$(RUNTIME_VERSION)" \
 			--file $(DOCKERFILE) \
 			$(CURDIR)
+
+PYTHON ?= python3
+
+# The Python dependencies are not fully pinned, so the only way to know which
+# dependencies and licenses were included is to inspect the actual Docker image
+# that was built.
+#
+# In CI the image is built as a multi-arch image with buildx and pushed to the
+# registry, so the linux/amd64 variant has to be pulled before it can be
+# inspected. For a normal local build the image is already available locally
+# and can be inspected directly. In both cases the goal is the same: verify the
+# licenses against the actual image that was built.
+#
+# TODO: once the Python dependencies are fully pinned, generate and verify the
+# notices directly from that pinned dependency set and remove the Docker image
+# inspection step entirely.
+define verify-notices-against-image
+@candidate=$$($(DOCKER) image inspect --format \
+	'{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' \
+	$(IMAGE)) && \
+echo "Verifying $(IMAGE) as $$candidate" && \
+$(PYTHON) $(CURDIR)/hack/generate-third-party-notices.py --image "$$candidate"
+@if ! git diff --exit-code -- THIRD_PARTY_NOTICES.md; then \
+	echo "ERROR: $(IMAGE) is not what THIRD_PARTY_NOTICES.md describes."; \
+	echo "Run 'make -f deployments/container/Makefile third-party-notices' and commit the result."; \
+	exit 1; \
+fi
+endef
+
+.PHONY: third-party-notices
+third-party-notices:
+	@$(PYTHON) $(CURDIR)/hack/generate-third-party-notices.py
+
+.PHONY: verify-third-party-notices
+verify-third-party-notices: DIST = $(DEFAULT_PUSH_TARGET)
+verify-third-party-notices:
+	$(verify-notices-against-image)
+
+.PHONY: verify-third-party-notices-from-registry
+verify-third-party-notices-from-registry: DIST = $(DEFAULT_PUSH_TARGET)
+verify-third-party-notices-from-registry:
+	@$(DOCKER) pull --platform linux/amd64 $(IMAGE)
+	$(verify-notices-against-image)
 
 .PHONY: bump-commit
 BUMP_COMMIT := Bump to version $(VERSION)

@@ -69,3 +69,17 @@ jobs:
         run: |
           echo "${VERSION}"
           make -f deployments/container/Makefile build-${{ matrix.dist }}
+
+      - name: Verify THIRD_PARTY_NOTICES.md describes the image just built
+        env:
+          IMAGE_NAME: ghcr.io/${LOWERCASE_REPO_OWNER}/k8s-cc-manager
+          VERSION: ${COMMIT_SHORT_SHA}
+        run: |
+          if [[ "${BUILD_MULTI_ARCH_IMAGES}" == "true" ]]; then
+            VERIFY_TARGET=verify-third-party-notices-from-registry
+          else
+            VERIFY_TARGET=verify-third-party-notices
+          fi
+          make -f deployments/container/Makefile \
+            DIST=${{ matrix.dist }} \
+            "${VERIFY_TARGET}"

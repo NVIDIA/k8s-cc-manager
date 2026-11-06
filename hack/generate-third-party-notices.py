@@ -82,7 +82,7 @@ KNOWN_SPDX_IDS = {
 SPDX_OPERATOR_RE = re.compile(r"\s+(?:AND|OR|WITH)\s+")
 
 PACKAGE_LICENSE_RULINGS = {
-    "python-dateutil": ("Dual License", "Apache-2.0 AND BSD-3-Clause"),
+    "python-dateutil": ("BSD-3-Clause", "Apache-2.0 AND BSD-3-Clause"),
 }
 
 UNRESOLVED_LICENSE = "See license text below"

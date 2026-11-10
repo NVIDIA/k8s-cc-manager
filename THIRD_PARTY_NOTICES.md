@@ -60,7 +60,7 @@ third-party dependency and is not listed here.
 | `typing-extensions` | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | `typing-inspection` | 0.4.5 | MIT | https://github.com/pydantic/typing-inspection |
 | `tzdata` | 2026.6 | Apache-2.0 | https://github.com/python/tzdata |
-| `urllib3` | 2.7.0 | MIT | https://urllib3.readthedocs.io |
+| `urllib3` | 2.8.0 | MIT | https://urllib3.readthedocs.io |
 | `websocket-client` | 1.9.2 | Apache-2.0 | https://github.com/websocket-client/websocket-client |
 | `yarl` | 1.25.1 | Apache-2.0 | https://github.com/aio-libs/yarl |
 
@@ -3010,7 +3010,7 @@ limitations under the License.
 
 ### urllib3
 
-* Version: 2.7.0
+* Version: 2.8.0
 * License: MIT
 * Source: https://urllib3.readthedocs.io
 
